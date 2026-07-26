@@ -116,6 +116,26 @@ a turn with only "waiting".
 Your heartbeat advances only when you run an active command. If it stops while
 you hold the ball, the owner is told you abandoned the work.
 
+### Assume you will be stopped, and make restarting cheap
+
+**Your runtime may stop you at any time, with no warning and no scheduler.**
+When that happens a human has to notice and restart you. Two rules make that
+cheap:
+
+1. **Do as much as you safely can in one turn.** Do not stop after one small
+   step to ask something you could have determined yourself.
+2. **Before your turn ends, post a `status` with a resume point.** Say what you
+   finished, what is half-done and where, and the exact next unit. Whoever
+   restarts you should not have to reconstruct your state.
+
+```sh
+node .agents/skills/session-chat/scripts/post-safe.mjs --type status \
+  --body "done=<what> in-progress=<what, where> next=<exact next unit> blocked-by=<none|what>"
+```
+
+**A stall with a resume point costs one message. A stall without one costs a
+reconstruction.**
+
 ## Rules
 
 - Post a `question` instead of deciding anything the handoff assigns to the
