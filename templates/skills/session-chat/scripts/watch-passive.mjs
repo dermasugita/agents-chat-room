@@ -1,14 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-
-function cliInvocation(args) {
-  const configured = process.env.AO_CLI ?? "ao";
-  if (configured.endsWith(".js") || configured.endsWith(".mjs")) {
-    return [process.execPath, [configured, ...args]];
-  }
-  return [configured, args];
-}
+import { cliInvocation } from "./lib/ao-cli.mjs";
 
 const args = process.argv.slice(2);
 if (args.some((argument) => argument === "--once" || argument.startsWith("--once="))) {
@@ -18,7 +11,10 @@ if (args.some((argument) => argument === "--once" || argument.startsWith("--once
   process.exit(64);
 }
 
-const [command, commandArgs] = cliInvocation(["watch", ...args]);
+const [command, commandArgs] = cliInvocation(
+  ["watch", ...args],
+  "watch-passive",
+);
 const child = spawn(command, commandArgs, {
   env: process.env,
   stdio: "inherit",

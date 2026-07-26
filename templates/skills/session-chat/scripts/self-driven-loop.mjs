@@ -1,14 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-
-function cliInvocation(args) {
-  const configured = process.env.AO_CLI ?? "ao";
-  if (configured.endsWith(".js") || configured.endsWith(".mjs")) {
-    return [process.execPath, [configured, ...args]];
-  }
-  return [configured, args];
-}
+import { cliInvocation } from "./lib/ao-cli.mjs";
 
 function run(command, args) {
   const result = spawnSync(command, args, {
@@ -54,7 +47,10 @@ for (let cycle = 1; cycle <= cycles; cycle += 1) {
   }
 
   console.error("self-driven-loop: active thread check");
-  const [aoCommand, aoArgs] = cliInvocation(["watch", "--once"]);
+  const [aoCommand, aoArgs] = cliInvocation(
+    ["watch", "--once"],
+    "self-driven-loop",
+  );
   const watchStatus = run(aoCommand, aoArgs);
   if (watchStatus !== 0) {
     process.exit(watchStatus);

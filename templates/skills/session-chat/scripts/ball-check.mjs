@@ -1,16 +1,12 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { cliInvocation } from "./lib/ao-cli.mjs";
 
-function cliInvocation(args) {
-  const configured = process.env.AO_CLI ?? "ao";
-  if (configured.endsWith(".js") || configured.endsWith(".mjs")) {
-    return [process.execPath, [configured, ...args]];
-  }
-  return [configured, args];
-}
-
-const [command, commandArgs] = cliInvocation(["watch", "--once", ...process.argv.slice(2)]);
+const [command, commandArgs] = cliInvocation(
+  ["watch", "--once", ...process.argv.slice(2)],
+  "ball-check",
+);
 const result = spawnSync(command, commandArgs, {
   encoding: "utf8",
   env: process.env,

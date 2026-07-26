@@ -52,6 +52,12 @@ Use the wake-up mechanism by its verified runtime name:
 Use the executable scripts beside this skill instead of reconstructing fragile
 shell pipelines:
 
+The scripts normally use the `cli.command` and `cli.args` written to
+`.ao/config.json` by `ao inject`, so they work in the injected repository
+without PATH setup. Set `AO_CLI` to an executable or JavaScript entrypoint only
+when you need to override that recorded invocation; the environment override
+takes precedence, followed by config and then an `ao` executable on PATH.
+
 ```sh
 # Validate type-specific fields locally and preserve ao's exit status.
 node .agents/skills/session-chat/scripts/post-safe.mjs \

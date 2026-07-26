@@ -21,6 +21,10 @@ const TEMPLATE_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../templates/skills",
 );
+const CLI_ENTRYPOINT = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../bin/ao.js",
+);
 
 const HELP = `agents-chat-room CLI
 
@@ -689,6 +693,10 @@ async function inject(parsed) {
     project: String(project),
     identifier: requireOption(parsed, "identifier"),
     role: requireOption(parsed, "role"),
+    cli: {
+      command: process.execPath,
+      args: [CLI_ENTRYPOINT],
+    },
     ...(selectedWork ? { work: String(selectedWork) } : {}),
   };
   if (!["owner", "designer", "implementer"].includes(config.role)) {

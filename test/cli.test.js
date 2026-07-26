@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
+  chmodSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -163,6 +164,13 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
   const result = await injectRepository(repository, "impl-a");
   assert.equal(result.project, "sample");
   assert.equal(result.documents, 1);
+  const config = JSON.parse(
+    readFileSync(join(repository, ".ao/config.json"), "utf8"),
+  );
+  assert.deepEqual(config.cli, {
+    command: process.execPath,
+    args: [cliPath],
+  });
 
   for (const path of [
     ".ao/config.json",
@@ -177,6 +185,8 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     ".agents/skills/session-chat/scripts/self-driven-loop.mjs",
     ".claude/skills/session-chat/scripts/ball-check.mjs",
     ".agents/skills/session-chat/scripts/ball-check.mjs",
+    ".claude/skills/session-chat/scripts/lib/ao-cli.mjs",
+    ".agents/skills/session-chat/scripts/lib/ao-cli.mjs",
     "CLAUDE.md",
     "AGENTS.md",
   ]) {
@@ -212,6 +222,18 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     assert.notEqual(statSync(claude).mode & 0o111, 0, script);
     assert.notEqual(statSync(agents).mode & 0o111, 0, script);
   }
+  const claudeHelper = join(
+    repository,
+    ".claude/skills/session-chat/scripts/lib/ao-cli.mjs",
+  );
+  const agentsHelper = join(
+    repository,
+    ".agents/skills/session-chat/scripts/lib/ao-cli.mjs",
+  );
+  assert.equal(
+    readFileSync(claudeHelper, "utf8"),
+    readFileSync(agentsHelper, "utf8"),
+  );
   assert.match(readFileSync(join(repository, ".gitignore"), "utf8"), /^\/\.ao\/$/m);
   assert.match(
     readFileSync(join(repository, ".ao/docs/CONTEXT.md"), "utf8"),
@@ -452,7 +474,7 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     repository,
     ".agents/skills/session-chat/scripts",
   );
-  const scriptEnvironment = { AO_CLI: cliPath };
+  const noAdditionalCliSetup = { AO_CLI: "", PATH: "" };
 
   const invalidAnswer = await runNodeScript(
     join(scriptRoot, "post-safe.mjs"),
@@ -489,6 +511,25 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
   assert.equal(downstreamFailure.code, 23);
   assert.match(downstreamFailure.stderr, /DOWNSTREAM_FAILURE/);
 
+  const pathOnlyRepository = makeRepository("built-in-path-fallback");
+  const pathBin = join(pathOnlyRepository, "bin");
+  mkdirSync(pathBin, { recursive: true });
+  const pathCli = join(pathBin, "ao");
+  writeFileSync(
+    pathCli,
+    `#!${process.execPath}\nprocess.stdout.write("PATH_FALLBACK " + process.argv.slice(2).join(" ") + "\\n");\n`,
+    "utf8",
+  );
+  chmodSync(pathCli, 0o755);
+  const pathFallback = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    ["--type", "status", "--body", "use PATH last"],
+    pathOnlyRepository,
+    { AO_CLI: "", PATH: pathBin },
+  );
+  assert.equal(pathFallback.code, 0, pathFallback.stderr);
+  assert.match(pathFallback.stdout, /^PATH_FALLBACK post --type status/);
+
   const posted = await runNodeScript(
     join(scriptRoot, "post-safe.mjs"),
     [
@@ -500,7 +541,7 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
       "日本語の投稿ラッパ確認",
     ],
     repository,
-    scriptEnvironment,
+    noAdditionalCliSetup,
   );
   assert.equal(posted.code, 0, posted.stderr);
   assert.match(posted.stdout, /日本語の投稿ラッパ確認/);
@@ -519,7 +560,7 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     join(scriptRoot, "watch-passive.mjs"),
     ["--since", String(since), "--interval", "0.01"],
     repository,
-    scriptEnvironment,
+    noAdditionalCliSetup,
   );
   assert.match(monitored.stdout, /MESSAGE .*日本語の長文です/);
   assert.doesNotMatch(monitored.stderr, /ERROR watch failure=/);
@@ -529,7 +570,7 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     join(scriptRoot, "watch-passive.mjs"),
     ["--since", String(latest), "--interval", "0.01"],
     repository,
-    scriptEnvironment,
+    noAdditionalCliSetup,
     100,
   );
   assert.doesNotMatch(empty.stdout, /MESSAGE /);
@@ -545,6 +586,10 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
       identifier: "failure-agent",
       role: "implementer",
       work: "work-one",
+      cli: {
+        command: process.execPath,
+        args: [cliPath],
+      },
     })}\n`,
     "utf8",
   );
@@ -552,7 +597,7 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     join(scriptRoot, "watch-passive.mjs"),
     ["--interval", "0.01"],
     failedRepository,
-    scriptEnvironment,
+    noAdditionalCliSetup,
     150,
   );
   assert.match(failed.stderr, /ERROR watch failure=1/);
@@ -572,7 +617,7 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     join(scriptRoot, "ball-check.mjs"),
     [],
     repository,
-    scriptEnvironment,
+    noAdditionalCliSetup,
   );
   assert.equal(ball.code, 0, ball.stderr);
   assert.match(ball.stdout, /^BALL has_ball=true idle=false reasons=/);
@@ -581,12 +626,37 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     join(scriptRoot, "self-driven-loop.mjs"),
     ["--", process.execPath, "-e", "console.log('WORK_UNIT_OK')"],
     repository,
-    scriptEnvironment,
+    noAdditionalCliSetup,
   );
   assert.equal(loop.code, 0, loop.stderr);
   assert.match(loop.stdout, /WORK_UNIT_OK/);
   assert.match(loop.stderr, /active thread check/);
   assert.match(loop.stderr, /cycle complete/);
+
+  const unresolvedRepository = makeRepository("built-in-unresolved-cli");
+  mkdirSync(join(unresolvedRepository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(unresolvedRepository, ".ao/config.json"),
+    `${JSON.stringify({
+      server_url: serverUrl,
+      project: "sample",
+      identifier: "unresolved-agent",
+      role: "implementer",
+      work: "work-one",
+    })}\n`,
+    "utf8",
+  );
+  const unresolved = await runNodeScript(
+    join(scriptRoot, "ball-check.mjs"),
+    [],
+    unresolvedRepository,
+    { AO_CLI: "", PATH: "" },
+  );
+  assert.equal(unresolved.code, 1);
+  assert.match(unresolved.stderr, /AO_CLI is not set/);
+  assert.match(unresolved.stderr, /has no valid cli\.command and cli\.args/);
+  assert.match(unresolved.stderr, /PATH contains no executable ao/);
+  assert.doesNotMatch(unresolved.stderr, /ENOENT/);
 });
 
 test("HTTP 400 exits 1 and explains the server rejection", async () => {
@@ -747,6 +817,9 @@ test("service skill templates contain none of the retired file protocol", () => 
     assert.doesNotMatch(content, /keep `ao watch` running/, path);
   }
   const sessionSkill = templateContents[0];
+  assert.match(sessionSkill, /AO_CLI/);
+  assert.match(sessionSkill, /cli\.command/);
+  assert.match(sessionSkill, /takes precedence/);
   for (const script of [
     "post-safe.mjs",
     "watch-passive.mjs",
@@ -758,6 +831,12 @@ test("service skill templates contain none of the retired file protocol", () => 
     assert.equal(existsSync(source), true, source);
     assert.notEqual(statSync(source).mode & 0o111, 0, source);
   }
+  assert.equal(
+    existsSync(
+      resolve("templates/skills/session-chat/scripts/lib/ao-cli.mjs"),
+    ),
+    true,
+  );
 });
 
 test("copy header stripping returns only the document body", () => {

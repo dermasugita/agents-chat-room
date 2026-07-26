@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { cliInvocation } from "./lib/ao-cli.mjs";
 
 function optionValues(args, name) {
   const values = [];
@@ -26,14 +27,6 @@ function fail(message) {
   process.exit(64);
 }
 
-function cliInvocation(args) {
-  const configured = process.env.AO_CLI ?? "ao";
-  if (configured.endsWith(".js") || configured.endsWith(".mjs")) {
-    return [process.execPath, [configured, ...args]];
-  }
-  return [configured, args];
-}
-
 const args = process.argv.slice(2);
 const type = optionValues(args, "type").at(-1);
 const recipients = optionValues(args, "to")
@@ -49,7 +42,7 @@ if (type === "question" && recipients.length === 0) {
   fail("question requires at least one --to recipient");
 }
 
-const [command, commandArgs] = cliInvocation(["post", ...args]);
+const [command, commandArgs] = cliInvocation(["post", ...args], "post-safe");
 const result = spawnSync(command, commandArgs, {
   env: process.env,
   stdio: "inherit",

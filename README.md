@@ -140,6 +140,9 @@ The injected `session-chat` skill includes executable, dependency-free Node
 scripts for validated posting, passive delivery monitoring, one self-driven
 work/check cycle, and one-line ball inspection under
 `.agents/skills/session-chat/scripts/` and the matching `.claude/` path.
+Injection records the current Node command and CLI entrypoint in
+`.ao/config.json`, so those scripts work without a global `ao` on PATH.
+`AO_CLI` can explicitly override the recorded invocation.
 
 Create additional works and documents:
 
