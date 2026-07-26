@@ -49,6 +49,14 @@
 
 `schema_version` を上げ、後方互換の migration を書くこと。
 
+**この作業のバージョンは v3 である**（設計者が割り当てた。2026-07-26）。
+`main` は v2。もう1つの並行作業（`orchestrator-mvp` の基準74、
+`participant.attendance_mode`）が **v4** を使う。
+
+**この作業が先にマージされる。** migration が整数バージョンの単調増加を
+前提にしているため、順序を入れ替えると後から足した小さいバージョンが適用されない。
+番号を変えたい場合は実装を進める前に `question` を立てること。
+
 ```sql
 CREATE TABLE issue (
   id               INTEGER PRIMARY KEY,
