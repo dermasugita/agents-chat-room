@@ -207,6 +207,8 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     ".ao/docs/CONTEXT.md",
     ".claude/skills/session-chat/SKILL.md",
     ".agents/skills/session-chat/SKILL.md",
+    ".claude/skills/design-handoff/SKILL.md",
+    ".agents/skills/design-handoff/SKILL.md",
     ".claude/skills/session-chat/scripts/post-safe.mjs",
     ".agents/skills/session-chat/scripts/post-safe.mjs",
     ".claude/skills/session-chat/scripts/watch-passive.mjs",
@@ -226,16 +228,22 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
   ]) {
     assert.equal(existsSync(join(repository, path)), true, path);
   }
-  assert.equal(
-    readFileSync(
-      join(repository, ".claude/skills/session-chat/SKILL.md"),
+  for (const skillName of ["session-chat", "design-handoff"]) {
+    const template = readFileSync(
+      resolve(`templates/skills/${skillName}/SKILL.md`),
       "utf8",
-    ),
-    readFileSync(
-      join(repository, ".agents/skills/session-chat/SKILL.md"),
+    );
+    const claude = readFileSync(
+      join(repository, `.claude/skills/${skillName}/SKILL.md`),
       "utf8",
-    ),
-  );
+    );
+    const agents = readFileSync(
+      join(repository, `.agents/skills/${skillName}/SKILL.md`),
+      "utf8",
+    );
+    assert.equal(claude, template, `${skillName} Claude copy`);
+    assert.equal(agents, template, `${skillName} Codex copy`);
+  }
   assert.match(
     readFileSync(
       join(repository, ".agents/skills/session-chat/SKILL.md"),
@@ -1146,7 +1154,7 @@ test("cold room join uses the declared slot, pulls context, and exposes the full
 
   const joined = await runNodeScript(
     helper,
-    [String(roomIndex + 1), "--repo", repository],
+    [String(roomIndex + 1), "--repo", "."],
     repository,
     roomHelperEnvironment,
   );
@@ -1780,6 +1788,32 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
   assert.equal(posted.code, 0, posted.stderr);
   assert.match(posted.stdout, /日本語の投稿ラッパ確認/);
 
+  const optionPost = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    [
+      "--type",
+      "status",
+      "--to",
+      "designer",
+      "--body",
+      "参照・期待・ボールのフラグ確認",
+      "--ref",
+      "context",
+      "--expect",
+      "context=1",
+      "--ball",
+      "built-in-agent",
+    ],
+    repository,
+    noAdditionalCliSetup,
+  );
+  assert.equal(optionPost.code, 0, optionPost.stderr);
+  const optionMessage = store.listMessages("sample", "work-one").at(-1);
+  assert.deepEqual(optionMessage.to, ["designer"]);
+  assert.deepEqual(optionMessage.refs, ["context"]);
+  assert.deepEqual(optionMessage.expects, [{ doc: "context", revision: 1 }]);
+  assert.deepEqual(optionMessage.ball, ["built-in-agent"]);
+
   const since = store.listMessages("sample", "work-one").at(-1).seq;
   store.postMessage("sample", "work-one", {
     idempotency_key: crypto.randomUUID(),
@@ -2132,24 +2166,54 @@ test("service skill templates contain none of the retired file protocol", () => 
   for (const [index, content] of templateContents.entries()) {
     const path = templatePaths[index];
     assert.match(content, /ao watch (?:--project )?--once/, path);
-    // Match the requirement, not one spelling of it: the concise session-chat
-    // rewrite says "every 2 minutes".
-    assert.match(content, /every (?:two|2) minutes/, path);
+    assert.match(
+      content,
+      /every (?:2|two) minutes|at least every\s+(?:2|two) minutes/,
+      path,
+    );
     assert.match(content, /persistent `ao watch`/, path);
     assert.match(content, /does not\s+update\s+your heartbeat/, path);
     assert.match(content, /hold (?:the ball|it)/, path);
     assert.match(content, /treated as\s+abandoned/, path);
     assert.match(content, /カスタム スケジュール/, path);
     assert.match(content, /Monitor/, path);
-    assert.match(
-      content,
-      /(?:other|another).*unknown runtime|runtime is\s+different/,
-      path,
-    );
-    assert.match(content, /do not invent|instead of inventing/, path);
-    assert.doesNotMatch(content, /keep `ao watch` running/, path);
   }
   const sessionSkill = templateContents[0];
+  assert.equal(
+    [...sessionSkill.matchAll(/^### ([1-7])\./gm)].map((match) =>
+      Number(match[1]),
+    ).join(","),
+    "1,2,3,4,5,6,7",
+  );
+  assert.match(
+    sessionSkill,
+    /### 3\. Create your own git worktree — mandatory/,
+  );
+  assert.match(sessionSkill, /Never work in the shared main checkout/);
+  assert.match(sessionSkill, /git worktree add worktree\/<WORK>/);
+  assert.match(sessionSkill, /### 4\. Join from inside the worktree/);
+  assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
+  assert.match(
+    sessionSkill,
+    /### 6\. Register a periodic self-check — mandatory/,
+  );
+  assert.match(sessionSkill, /Confirm it fired at least once/);
+  assert.match(
+    sessionSkill,
+    /cannot register it.*say so in step 7.*check every 2 minutes/s,
+  );
+  assert.match(sessionSkill, /### 7\. Post the startup report/);
+  assert.match(
+    sessionSkill,
+    /worktree=<path> branch=<branch> identifier=<id> schedule=<registered\|unavailable:<reason>>/,
+  );
+  assert.match(sessionSkill, /post-safe\.mjs --type status/);
+  assert.match(
+    sessionSkill,
+    /post-safe\.mjs --type <type> --body <text> \[--to ID\] \[--reply-to SEQ\] \[--ball ID\]/,
+  );
+  assert.match(sessionSkill, /`--ref` adds references/);
+  assert.match(sessionSkill, /`--expect <doc>=<rev>` records/);
   assert.match(sessionSkill, /AO_CLI/);
   assert.match(sessionSkill, /cli\.command/);
   assert.match(sessionSkill, /takes precedence|override the recorded CLI path/);
@@ -2159,18 +2223,12 @@ test("service skill templates contain none of the retired file protocol", () => 
   );
   assert.match(sessionSkill, /Only `AO_SERVER_URL` overrides a repository/);
   assert.match(sessionSkill, /Which room number should I join\?/);
-  assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
   assert.match(sessionSkill, /handoff.*`CONTEXT\.md`.*every ADR/s);
-  assert.match(sessionSkill, /unanswered question.*before lower-priority work/s);
-  assert.match(sessionSkill, /Begin the self-driven loop.*`ao watch --once`/s);
-  assert.match(sessionSkill, /post a `status` start message/);
-  assert.match(sessionSkill, /Never silently reuse an occupied implementer slot/);
   assert.match(
     sessionSkill,
-    /`--identifier` \/ `--role`.*`AO_IDENTIFIER` \/ `AO_ROLE`.*repository `\.ao\/config\.json`/s,
+    /`--identifier`\/`--role`.*`AO_IDENTIFIER`\/`AO_ROLE`.*`\.ao\/config\.json`/s,
   );
-  assert.match(sessionSkill, /Do not write identity into\s+`~\/\.ao\/config\.json`/);
-  assert.match(sessionSkill, /multiple\s+agents share one checkout/);
+  assert.match(sessionSkill, /Only the owner can dismiss you/);
   const designerSkill = templateContents[1];
   assert.match(
     designerSkill,
@@ -2184,6 +2242,16 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(designerSkill, /skeleton_grill\.required=true/);
   assert.match(designerSkill, /ao watch --project --once/);
   assert.match(designerSkill, /fans out to every work/);
+  assert.match(
+    designerSkill,
+    /Register a periodic self-check — mandatory/,
+  );
+  assert.match(designerSkill, /Confirm it fired at least once/);
+  assert.match(
+    designerSkill,
+    /identifier=<id> project=<slug> works=<n> schedule=<registered\|unavailable:<reason>> first-unit=<what>/,
+  );
+  assert.match(designerSkill, /Do not use a worktree for designing/);
   assert.match(designerSkill, /Publish before announcing/);
   assert.match(designerSkill, /Classify every open judgment/);
   assert.match(designerSkill, /passing test is not completion\s+evidence/i);
