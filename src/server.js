@@ -100,6 +100,15 @@ async function routeApi(request, response, url, store) {
     }
   }
 
+  if (path === "/api/v1/issues" && method === "GET") {
+    json(response, 200, {
+      projects: store.listIssuesAcrossProjects(
+        url.searchParams.get("state") ?? "open",
+      ),
+    });
+    return true;
+  }
+
   let match = path.match(/^\/api\/v1\/projects\/([^/]+)$/);
   if (match) {
     const project = decode(match[1]);
@@ -126,6 +135,78 @@ async function routeApi(request, response, url, store) {
   );
   if (match && method === "GET") {
     json(response, 200, store.previewProjectDeletion(decode(match[1])));
+    return true;
+  }
+
+  match = path.match(/^\/api\/v1\/projects\/([^/]+)\/issues$/);
+  if (match) {
+    const project = decode(match[1]);
+    if (method === "GET") {
+      json(response, 200, {
+        issues: store.listIssues(
+          project,
+          url.searchParams.get("state") ?? "open",
+        ),
+      });
+      return true;
+    }
+    if (method === "POST") {
+      json(response, 201, store.createIssue(project, await readJson(request)));
+      return true;
+    }
+  }
+
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/issues\/(\d+)\/comments$/,
+  );
+  if (match && method === "POST") {
+    json(
+      response,
+      201,
+      store.addIssueComment(
+        decode(match[1]),
+        Number(match[2]),
+        await readJson(request),
+      ),
+    );
+    return true;
+  }
+
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/issues\/(\d+)\/close$/,
+  );
+  if (match && method === "POST") {
+    json(
+      response,
+      200,
+      store.closeIssue(
+        decode(match[1]),
+        Number(match[2]),
+        await readJson(request),
+      ),
+    );
+    return true;
+  }
+
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/issues\/(\d+)\/reopen$/,
+  );
+  if (match && method === "POST") {
+    json(
+      response,
+      200,
+      store.reopenIssue(decode(match[1]), Number(match[2])),
+    );
+    return true;
+  }
+
+  match = path.match(/^\/api\/v1\/projects\/([^/]+)\/issues\/(\d+)$/);
+  if (match && method === "GET") {
+    json(
+      response,
+      200,
+      store.getIssue(decode(match[1]), Number(match[2])),
+    );
     return true;
   }
 

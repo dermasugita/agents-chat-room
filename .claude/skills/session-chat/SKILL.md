@@ -27,9 +27,6 @@ this file.
 Print the numbered list, then ask: "Which room number should I join?"
 Ask nothing else. `presence=present` means another process already holds that
 identity; the owner picking that number is the confirmation to proceed.
-**Never silently reuse an occupied implementer slot**: `ao join` refuses it
-without `--confirm-occupied`, and the helper passes that flag only after the
-owner chose a visibly occupied room.
 
 ### 3. Create your own git worktree — mandatory
 
@@ -80,7 +77,7 @@ and prints the whole thread. If the room shows `slot=undeclared`, add
 
 Read the handoff for your work, then `CONTEXT.md`, then every ADR. Read every
 message that join printed, not only the last. Answer every unanswered question
-addressed to you before lower-priority work.
+addressed to you before anything else.
 
 ### 6. Register a periodic self-check — mandatory
 
@@ -90,8 +87,6 @@ Nothing will wake you. Register a repeating check now:
   English manual) that runs `ao watch --once` every 2 minutes.
 - **Claude Code**: run `watch-passive.mjs` under Monitor **and** keep calling
   `ao watch --once` yourself. Monitor alone does not refresh your heartbeat.
-- **Any other or unknown runtime**: rely on the loop below alone; do not invent
-  a feature name or procedure — ask the owner.
 
 **Confirm it fired at least once before continuing.** If you cannot register it,
 say so in step 7 and state how else you will check every 2 minutes. Silently
@@ -105,46 +100,21 @@ node .agents/skills/session-chat/scripts/post-safe.mjs --type status \
 ```
 
 Name your worktree path, branch, identifier, and whether step 6 succeeded.
-This post is the proof that startup finished — post a `status` start message
-before doing any work. Begin the self-driven loop below immediately afterwards,
-starting with `ao watch --once`.
+This post is the proof that startup finished.
 
 ## Loop: repeat until the owner dismisses you
 
 1. Do one bounded unit of work (one file, one test batch).
 2. Run `ao watch --once`.
 3. Read every line. If `your_ball` is true, keep working; do not wait.
-4. Go to 1. Run `ao issues <PROJECT>` at startup and every few cycles — nothing
-   raises an issue for you.
+4. Go to 1.
 
 Run step 2 at least every 2 minutes during long work. If you must wait on
 something external, post what you are waiting for, then keep looping. Never end
 a turn with only "waiting".
 
-Your heartbeat advances only when you run an active command.
-A persistent `ao watch` delivers messages but does not update your heartbeat,
-so it never replaces this loop. If your heartbeat stops while you hold the ball,
-you are treated as abandoned and the owner is told.
-
-### Assume you will be stopped, and make restarting cheap
-
-**Your runtime may stop you at any time, with no warning and no scheduler.**
-When that happens a human has to notice and restart you. Two rules make that
-cheap:
-
-1. **Do as much as you safely can in one turn.** Do not stop after one small
-   step to ask something you could have determined yourself.
-2. **Before your turn ends, post a `status` with a resume point.** Say what you
-   finished, what is half-done and where, and the exact next unit. Whoever
-   restarts you should not have to reconstruct your state.
-
-```sh
-node .agents/skills/session-chat/scripts/post-safe.mjs --type status \
-  --body "done=<what> in-progress=<what, where> next=<exact next unit> blocked-by=<none|what>"
-```
-
-**A stall with a resume point costs one message. A stall without one costs a
-reconstruction.**
+Your heartbeat advances only when you run an active command. If it stops while
+you hold the ball, the owner is told you abandoned the work.
 
 ## Rules
 
@@ -157,21 +127,8 @@ reconstruction.**
   in them as a `question`.
 - A passing test suite is not acceptance. Check each acceptance criterion,
   including the domain-specific ones, and report measured values.
-- **Work outside the current scope becomes an issue, not a `question`.** File it
-  with `ao issue-create` in the project that owns it, which may not be yours.
-  Use a `question` only when someone must answer now.
-  Issues send no notification and never create a ball, so read them yourself
-  with `ao issues <PROJECT>`.
-- **Pushing your own work branch is pre-authorized. Do not ask, and do not
-  wait.** Commit and `git push` whenever you have something worth keeping —
-  including work in progress. If a tool gate asks you to confirm sending code to
-  the remote, this rule is your standing authorization; confirm it.
-  Unpushed commits have already been lost in this project, and a pushed work
-  branch changes nothing for anyone else.
-- **Publishing still needs an explicit owner instruction.** Without one, never:
-  open or merge a pull request; push to `main` or to any branch another checkout
-  holds; deploy or restart a production service; delete anything that is not
-  empty.
+- Commit and push only when authorized. Never open a pull request or deploy
+  because implementation feels finished.
 - `resolve` records agreement. It does not end monitoring and does not let you
   leave. **Only the owner can dismiss you.**
 - Never pipe `ao post` through `grep`, and never use `jq` to decide whether a
@@ -189,16 +146,6 @@ ao resolve                         # record agreement (does not end monitoring)
 ```
 
 ```sh
-# Issues: backlog for later, in any project. No notification, no ball.
-ao issues <PROJECT> [--state open|closed|all]
-ao issue <PROJECT> <NUMBER>
-ao issue-create <PROJECT> --title TITLE --body TEXT
-ao issue-comment <PROJECT> <NUMBER> --body TEXT
-ao issue-close <PROJECT> <NUMBER> --reason TEXT   # --reason is required
-ao issue-reopen <PROJECT> <NUMBER>
-```
-
-```sh
 # Scripts beside this skill. They read cli.command from .ao/config.json.
 post-safe.mjs --type <type> --body <text> [--to ID] [--reply-to SEQ] [--ball ID]
 watch-passive.mjs                  # Claude Code delivery only; sends no heartbeat
@@ -211,24 +158,9 @@ join-room.mjs [<NUMBER> --repo .]  # list rooms, or join one
 the revision you relied on. An `answer` requires `--reply-to`. `--ball` declares
 non-question ownership; it cannot clear an unanswered question.
 
-## Resolution order — both directions matter
-
-The server resolves as `AO_SERVER_URL`, then repository `.ao/config.json`, then
-the user default in `~/.ao/config.json`.
-**Only `AO_SERVER_URL` overrides a repository setting.** Writing a server into
-`~/.ao/config.json` once sent this project's traffic to the wrong database.
-
-Identity resolves the other way round, most specific first:
-`--identifier` / `--role`, then `AO_IDENTIFIER` / `AO_ROLE`, then repository `.ao/config.json`.
-**Do not write identity into `~/.ao/config.json`** — it is a
-server default only. When multiple agents share one checkout, give each process
-its own `AO_IDENTIFIER`; a shared repository config once recorded a designer's
-posts as `implementer`, so answers never resolved their questions and the room
-stayed permanently abandoned. Rationale:
-`docs/adr/0010-identity-is-per-agent-not-per-repository.md`.
-
-Set `AO_CLI` only to override the recorded CLI path; the environment variable
-takes precedence, then `cli.command` in config, then `ao` on PATH.
+Identity resolves as `--identifier`/`--role`, then `AO_IDENTIFIER`/`AO_ROLE`,
+then `.ao/config.json`. Set `AO_CLI` only to override the recorded CLI path.
+Rationale: `docs/adr/0010-identity-is-per-agent-not-per-repository.md`.
 
 If your config has `role=designer` and no `work`, you are project-scoped:
 follow the `design-handoff` skill and use `ao watch --project --once`.

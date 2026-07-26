@@ -71,16 +71,12 @@ ao post --type status --work <SLUG> \
 ### Then loop
 
 ```sh
-ao issues <PROJECT>
 ao watch --project --once
 ```
 
 This one active command fans out to every work and refreshes the designer
 heartbeat in each. Its `PROJECT_WORK` lines make each work's ball,
 abandonment, and idle state visible in one session.
-The issue command lists the project's open backlog. Issues do not notify you or
-create a ball, so check them explicitly at startup and during every periodic
-review cycle.
 
 **Do not use a worktree for designing.** You publish documents through the
 server, so you need no branch. Never share a checkout with an implementer: give
@@ -142,7 +138,6 @@ Assume that no notification will wake you. After each bounded design or review
 unit (one document section, one commit review, or one test batch), run:
 
 ```sh
-ao issues <PROJECT>
 ao watch --project --once
 ```
 

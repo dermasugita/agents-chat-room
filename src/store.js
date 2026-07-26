@@ -378,6 +378,276 @@ export function createStore(database, options = {}) {
     };
   }
 
+  function requireIssueIdentity(input) {
+    const originProject = requireSlug(input?.origin_project, "origin_project");
+    assert(
+      typeof input?.origin_identifier === "string" &&
+        input.origin_identifier.trim(),
+      400,
+      "invalid_request",
+      "origin_identifier is required",
+    );
+    assert(
+      ROLES.has(input?.origin_role),
+      400,
+      "invalid_request",
+      "origin_role is invalid",
+    );
+    const originWork =
+      input?.origin_work === undefined || input.origin_work === null
+        ? null
+        : requireSlug(input.origin_work, "origin_work");
+    return {
+      origin_project: originProject,
+      origin_identifier: input.origin_identifier.trim(),
+      origin_role: input.origin_role,
+      origin_work: originWork,
+    };
+  }
+
+  function requireIssueNumber(value) {
+    const number = Number(value);
+    assert(
+      Number.isInteger(number) && number > 0,
+      400,
+      "invalid_request",
+      "issue number must be a positive integer",
+    );
+    return number;
+  }
+
+  function requireIssueState(value = "open") {
+    assert(
+      value === "open" || value === "closed" || value === "all",
+      400,
+      "invalid_request",
+      "state must be open, closed, or all",
+    );
+    return value;
+  }
+
+  function issueByNumber(projectSlug, requestedNumber) {
+    const project = projectBySlug(projectSlug);
+    const number = requireIssueNumber(requestedNumber);
+    const issue = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE issue.project_id = ? AND issue.number = ?`,
+      )
+      .get(project.id, number);
+    assert(
+      issue,
+      404,
+      "issue_not_found",
+      `Issue not found: ${projectSlug}#${number}`,
+    );
+    return issue;
+  }
+
+  function serializeIssue(row, comments = undefined) {
+    const {
+      id: _id,
+      project_id: _projectId,
+      project_slug: project,
+      project_name: projectName,
+      ...issue
+    } = row;
+    return {
+      project,
+      project_name: projectName,
+      ...issue,
+      ...(comments === undefined ? {} : { comments }),
+    };
+  }
+
+  function serializeIssueComment(row) {
+    const { id: _id, issue_id: _issueId, ...comment } = row;
+    return comment;
+  }
+
+  function createIssue(projectSlug, input) {
+    const project = projectBySlug(projectSlug);
+    assert(
+      typeof input?.title === "string" && input.title.trim(),
+      400,
+      "invalid_request",
+      "title is required",
+    );
+    assert(
+      typeof input?.body === "string",
+      400,
+      "invalid_request",
+      "body is required",
+    );
+    const identity = requireIssueIdentity(input);
+    return inTransaction(database, () => {
+      const number = database
+        .prepare(
+          "SELECT COALESCE(MAX(number), 0) + 1 AS next FROM issue WHERE project_id = ?",
+        )
+        .get(project.id).next;
+      database
+        .prepare(
+          `INSERT INTO issue(
+             project_id, number, title, body, state,
+             origin_project, origin_identifier, origin_role, origin_work,
+             created_at, closed_at, closed_by, close_reason
+           ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+        )
+        .run(
+          project.id,
+          number,
+          input.title.trim(),
+          input.body,
+          identity.origin_project,
+          identity.origin_identifier,
+          identity.origin_role,
+          identity.origin_work,
+          now(),
+        );
+      return serializeIssue(issueByNumber(projectSlug, number));
+    });
+  }
+
+  function listIssues(projectSlug, state = "open") {
+    const project = projectBySlug(projectSlug);
+    const selectedState = requireIssueState(state);
+    const rows = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE issue.project_id = ?
+           AND (? = 'all' OR issue.state = ?)
+         ORDER BY issue.number`,
+      )
+      .all(project.id, selectedState, selectedState);
+    return rows.map((row) => serializeIssue(row));
+  }
+
+  function listIssuesAcrossProjects(state = "open") {
+    const selectedState = requireIssueState(state);
+    const rows = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE ? = 'all' OR issue.state = ?
+         ORDER BY project.slug, issue.number`,
+      )
+      .all(selectedState, selectedState);
+    const projects = [];
+    for (const row of rows) {
+      let group = projects.at(-1);
+      if (!group || group.project.slug !== row.project_slug) {
+        group = {
+          project: { slug: row.project_slug, name: row.project_name },
+          issues: [],
+        };
+        projects.push(group);
+      }
+      group.issues.push(serializeIssue(row));
+    }
+    return projects;
+  }
+
+  function getIssue(projectSlug, requestedNumber) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    const comments = database
+      .prepare(
+        "SELECT * FROM issue_comment WHERE issue_id = ? ORDER BY seq",
+      )
+      .all(issue.id)
+      .map(serializeIssueComment);
+    return serializeIssue(issue, comments);
+  }
+
+  function addIssueComment(projectSlug, requestedNumber, input) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    assert(
+      typeof input?.body === "string" && input.body.trim(),
+      400,
+      "invalid_request",
+      "body is required",
+    );
+    const identity = requireIssueIdentity(input);
+    return inTransaction(database, () => {
+      const seq = database
+        .prepare(
+          "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM issue_comment WHERE issue_id = ?",
+        )
+        .get(issue.id).next;
+      const result = database
+        .prepare(
+          `INSERT INTO issue_comment(
+             issue_id, seq, body, origin_project, origin_identifier,
+             origin_role, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          issue.id,
+          seq,
+          input.body,
+          identity.origin_project,
+          identity.origin_identifier,
+          identity.origin_role,
+          now(),
+        );
+      return serializeIssueComment(
+        database
+          .prepare("SELECT * FROM issue_comment WHERE id = ?")
+          .get(result.lastInsertRowid),
+      );
+    });
+  }
+
+  function closeIssue(projectSlug, requestedNumber, input) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    assert(
+      typeof input?.reason === "string" && input.reason.trim(),
+      400,
+      "invalid_request",
+      "reason is required",
+    );
+    const identity = requireIssueIdentity(input);
+    assert(
+      issue.state === "open",
+      409,
+      "issue_already_closed",
+      `Issue is already closed: ${projectSlug}#${issue.number}`,
+    );
+    database
+      .prepare(
+        `UPDATE issue
+         SET state = 'closed', closed_at = ?, closed_by = ?, close_reason = ?
+         WHERE id = ?`,
+      )
+      .run(
+        now(),
+        `${identity.origin_project}/${identity.origin_identifier}`,
+        input.reason.trim(),
+        issue.id,
+      );
+    return getIssue(projectSlug, issue.number);
+  }
+
+  function reopenIssue(projectSlug, requestedNumber) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    assert(
+      issue.state === "closed",
+      409,
+      "issue_already_open",
+      `Issue is already open: ${projectSlug}#${issue.number}`,
+    );
+    database
+      .prepare(
+        `UPDATE issue
+         SET state = 'open', closed_at = NULL, closed_by = NULL, close_reason = NULL
+         WHERE id = ?`,
+      )
+      .run(issue.id);
+    return getIssue(projectSlug, issue.number);
+  }
+
   function health() {
     return {
       status: "ok",
@@ -392,7 +662,10 @@ export function createStore(database, options = {}) {
       .prepare(
         `SELECT project.*,
                 (SELECT COUNT(*) FROM work WHERE work.project_id = project.id) AS work_count,
-                (SELECT COUNT(*) FROM document WHERE document.project_id = project.id) AS document_count
+                (SELECT COUNT(*) FROM document WHERE document.project_id = project.id) AS document_count,
+                (SELECT COUNT(*) FROM issue WHERE issue.project_id = project.id) AS issue_count,
+                (SELECT COUNT(*) FROM issue
+                 WHERE issue.project_id = project.id AND issue.state = 'open') AS open_issue_count
          FROM project
          ORDER BY project.slug`,
       )
@@ -492,6 +765,8 @@ export function createStore(database, options = {}) {
       participants: 0,
       documents: 0,
       revisions: 0,
+      issues: 0,
+      issue_comments: 0,
       message_recipients: 0,
       message_refs: 0,
       message_expectations: 0,
@@ -569,6 +844,24 @@ export function createStore(database, options = {}) {
          WHERE document.project_id = ?`,
       )
       .get(project.id);
+    const issueCounts = database
+      .prepare(
+        `SELECT COUNT(DISTINCT issue.id) AS issue_count,
+                COUNT(issue_comment.id) AS comment_count
+         FROM issue
+         LEFT JOIN issue_comment ON issue_comment.issue_id = issue.id
+         WHERE issue.project_id = ?`,
+      )
+      .get(project.id);
+    // origin_project is plain text, so issues filed elsewhere from this project
+    // survive the delete with an origin that no longer resolves. They are not
+    // deleted, but the owner must see them before confirming.
+    const foreignIssuesFromHere = database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM issue
+         WHERE origin_project = ? AND project_id <> ?`,
+      )
+      .get(projectSlug, project.id);
     return {
       target: { project: projectSlug },
       totals: {
@@ -581,6 +874,13 @@ export function createStore(database, options = {}) {
         ),
         documents: Number(projectDocumentCounts.document_count),
         revisions: Number(projectDocumentCounts.revision_count),
+        issues: Number(issueCounts.issue_count),
+        issue_comments: Number(issueCounts.comment_count),
+      },
+      retained: {
+        issues_in_other_projects_citing_this_origin: Number(
+          foreignIssuesFromHere.count,
+        ),
       },
       works,
     };
@@ -634,7 +934,16 @@ export function createStore(database, options = {}) {
       const documentIds =
         "SELECT id FROM document WHERE project_id = ?";
       const workIds = "SELECT id FROM work WHERE project_id = ?";
+      const issueIds = "SELECT id FROM issue WHERE project_id = ?";
 
+      deleted.issue_comments = deletedRows(
+        `DELETE FROM issue_comment WHERE issue_id IN (${issueIds})`,
+        project.id,
+      );
+      deleted.issues = deletedRows(
+        "DELETE FROM issue WHERE project_id = ?",
+        project.id,
+      );
       deleted.message_recipients = deletedRows(
         `DELETE FROM message_to WHERE message_id IN (${messageIds})`,
         project.id,
@@ -1903,21 +2212,27 @@ export function createStore(database, options = {}) {
   }
 
   return {
+    addIssueComment,
     ballFor,
     closeQuestion,
+    closeIssue,
     createDocument,
+    createIssue,
     createProject,
     createWork,
     deleteParticipant,
     deleteProject,
     deleteWork,
     getDocument,
+    getIssue,
     getProject,
     getWork,
     health,
     inbox,
     importBundle,
     listDocuments,
+    listIssues,
+    listIssuesAcrossProjects,
     listMessages,
     listProjects,
     listRevisions,
@@ -1928,6 +2243,7 @@ export function createStore(database, options = {}) {
     previewProjectDeletion,
     previewWorkDeletion,
     resolveWork,
+    reopenIssue,
     seedImportedMessage,
     updateDocument,
     _database: database,

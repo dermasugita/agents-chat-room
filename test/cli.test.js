@@ -236,6 +236,20 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
       "utf8",
     ),
   );
+  assert.match(
+    readFileSync(
+      join(repository, ".agents/skills/session-chat/SKILL.md"),
+      "utf8",
+    ),
+    /outside the current scope[\s\S]*ao issue-create[\s\S]*question[\s\S]*no notification/,
+  );
+  assert.match(
+    readFileSync(
+      join(repository, ".agents/skills/design-handoff/SKILL.md"),
+      "utf8",
+    ),
+    /ao issues <PROJECT>[\s\S]*Issues do not notify you or[\s\S]*startup and during every periodic/,
+  );
   for (const script of [
     "post-safe.mjs",
     "watch-passive.mjs",
@@ -353,6 +367,134 @@ test("inject creates or reuses --work and the repository is immediately usable",
     watched.stdout,
     /MESSAGE seq=1 type=message from=inject-worker .*body="usable immediately"/,
   );
+});
+
+test("issue CLI derives origin from config and supports the full lifecycle", async () => {
+  store.createProject({ slug: "issue-cli-target", name: "Issue CLI target" });
+  const repository = makeRepository("issue-cli");
+  await injectRepository(repository, "issue-origin");
+  const heartbeatBefore = heartbeatFor("issue-origin");
+  await waitForClockTick();
+
+  const created = await runCli(
+    [
+      "issue-create",
+      "issue-cli-target",
+      "--title",
+      "Cross-project issue",
+      "--body",
+      "Created from the sample project",
+    ],
+    repository,
+  );
+  assert.equal(created.code, 0, created.stderr);
+  assert.deepEqual(
+    (({
+      project,
+      number,
+      state,
+      origin_project,
+      origin_identifier,
+      origin_role,
+      origin_work,
+    }) => ({
+      project,
+      number,
+      state,
+      origin_project,
+      origin_identifier,
+      origin_role,
+      origin_work,
+    }))(JSON.parse(created.stdout)),
+    {
+      project: "issue-cli-target",
+      number: 1,
+      state: "open",
+      origin_project: "sample",
+      origin_identifier: "issue-origin",
+      origin_role: "implementer",
+      origin_work: "work-one",
+    },
+  );
+
+  const forgedOrigin = await runCli(
+    [
+      "issue-create",
+      "issue-cli-target",
+      "--title",
+      "Rejected",
+      "--body",
+      "Rejected",
+      "--origin-project",
+      "forged",
+    ],
+    repository,
+  );
+  assert.notEqual(forgedOrigin.code, 0);
+  assert.match(forgedOrigin.stderr, /Unknown option --origin-project/);
+
+  const comment = await runCli(
+    [
+      "issue-comment",
+      "issue-cli-target",
+      "1",
+      "--body",
+      "Implementation note",
+    ],
+    repository,
+  );
+  assert.equal(comment.code, 0, comment.stderr);
+  assert.equal(JSON.parse(comment.stdout).origin_identifier, "issue-origin");
+
+  const detail = await runCli(
+    ["issue", "issue-cli-target", "1"],
+    repository,
+  );
+  assert.equal(detail.code, 0, detail.stderr);
+  assert.deepEqual(
+    JSON.parse(detail.stdout).comments.map(({ seq, body }) => ({ seq, body })),
+    [{ seq: 1, body: "Implementation note" }],
+  );
+
+  const closed = await runCli(
+    [
+      "issue-close",
+      "issue-cli-target",
+      "1",
+      "--reason",
+      "Verified",
+    ],
+    repository,
+  );
+  assert.equal(closed.code, 0, closed.stderr);
+  assert.equal(JSON.parse(closed.stdout).closed_by, "sample/issue-origin");
+
+  const openList = await runCli(
+    ["issues", "issue-cli-target"],
+    repository,
+  );
+  assert.equal(openList.code, 0, openList.stderr);
+  assert.deepEqual(JSON.parse(openList.stdout).issues, []);
+
+  const crossProject = await runCli(
+    ["issues", "--state", "closed"],
+    repository,
+  );
+  assert.equal(crossProject.code, 0, crossProject.stderr);
+  assert.equal(
+    JSON.parse(crossProject.stdout).projects.find(
+      ({ project }) => project.slug === "issue-cli-target",
+    ).issues[0].number,
+    1,
+  );
+
+  const reopened = await runCli(
+    ["issue-reopen", "issue-cli-target", "1"],
+    repository,
+  );
+  assert.equal(reopened.code, 0, reopened.stderr);
+  assert.equal(JSON.parse(reopened.stdout).state, "open");
+  assert.equal(heartbeatFor("issue-origin"), heartbeatBefore);
 });
 
 test("server resolution is environment, repository config, then user default", () => {
@@ -891,6 +1033,8 @@ test("delete CLI commands stay on the repository server and report protected cle
     participants: 1,
     documents: 0,
     revisions: 0,
+    issues: 0,
+    issue_comments: 0,
     message_recipients: 0,
     message_refs: 0,
     message_expectations: 0,
@@ -1988,11 +2132,9 @@ test("service skill templates contain none of the retired file protocol", () => 
   for (const [index, content] of templateContents.entries()) {
     const path = templatePaths[index];
     assert.match(content, /ao watch (?:--project )?--once/, path);
-    assert.match(
-      content,
-      /every two minutes|at least every\s+two minutes/,
-      path,
-    );
+    // Match the requirement, not one spelling of it: the concise session-chat
+    // rewrite says "every 2 minutes".
+    assert.match(content, /every (?:two|2) minutes/, path);
     assert.match(content, /persistent `ao watch`/, path);
     assert.match(content, /does not\s+update\s+your heartbeat/, path);
     assert.match(content, /hold (?:the ball|it)/, path);
@@ -2010,7 +2152,7 @@ test("service skill templates contain none of the retired file protocol", () => 
   const sessionSkill = templateContents[0];
   assert.match(sessionSkill, /AO_CLI/);
   assert.match(sessionSkill, /cli\.command/);
-  assert.match(sessionSkill, /takes precedence/);
+  assert.match(sessionSkill, /takes precedence|override the recorded CLI path/);
   assert.match(
     sessionSkill,
     /AO_SERVER_URL.*repository `\.ao\/config\.json`.*~\/\.ao\/config\.json/s,
