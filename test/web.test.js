@@ -90,6 +90,18 @@ test("web shows projects and the cross-project owner inbox", async () => {
   assert.match(html, /aria-label="作業スレッド"/);
   assert.match(html, /class="sidebar-link sidebar-home is-active" href="\/" aria-current="page"/);
   assert.match(html, /href="\/projects\/web-project\/works\/web-work"/);
+  assert.match(html, /class="sidebar-project-toggle" type="button"/);
+  assert.match(html, /aria-expanded="true" aria-controls="sidebar-project-0-works"/);
+  assert.match(
+    html,
+    /data-sidebar-project-toggle data-project="web-project"\s*data-project-name="Web project"/,
+  );
+  assert.match(html, /id="sidebar-project-0-works"/);
+  assert.match(html, /localStorage\.getItem\(storageKey\)/);
+  assert.match(html, /localStorage\.setItem\(storageKey, String\(nextCollapsed\)\)/);
+  assert.match(html, /workTree\.hidden = collapsed/);
+  assert.match(html, /collapsed \? "▸" : "▾"/);
+  assert.match(html, /event\.key !== "Enter" && event\.key !== " "/);
   assert.match(html, /@media \(max-width:760px\)/);
   assert.doesNotMatch(html, /Owner inbox|Answer as owner/);
 });
@@ -101,6 +113,10 @@ test("sidebar shows project-work hierarchy and the current location", async () =
   assert.match(
     project,
     /sidebar-project-link is-active"[\s\S]*?href="\/projects\/web-project" aria-current="page"/,
+  );
+  assert.match(
+    project,
+    /<button class="sidebar-project-toggle"[\s\S]*?<\/button>\s*<a class="sidebar-link sidebar-project-link is-active"/,
   );
 
   const document = await (

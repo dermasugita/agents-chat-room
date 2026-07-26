@@ -155,9 +155,10 @@ function sidebar(
 ) {
   const projects = store.listProjects();
   const tree = projects
-    .map((project) => {
+    .map((project, projectIndex) => {
       const projectDetails = store.getProject(project.slug);
       const projectActive = project.slug === currentProject;
+      const workTreeId = `sidebar-project-${projectIndex}-works`;
       const projectCurrent = projectActive
         ? ` aria-current="${projectPageCurrent ? "page" : "location"}"`
         : "";
@@ -170,11 +171,16 @@ function sidebar(
           })
           .join("") || '<li class="sidebar-empty">作業はまだありません。</li>';
       return `<li class="sidebar-project">
-        <div class="sidebar-project-node"><span aria-hidden="true">▾</span>
+        <div class="sidebar-project-node">
+          <button class="sidebar-project-toggle" type="button"
+            aria-expanded="true" aria-controls="${workTreeId}"
+            aria-label="${escapeHtml(project.name)}の作業を折りたたむ"
+            data-sidebar-project-toggle data-project="${escapeHtml(project.slug)}"
+            data-project-name="${escapeHtml(project.name)}"><span aria-hidden="true" data-sidebar-project-symbol>▾</span></button>
           <a class="sidebar-link sidebar-project-link${projectActive ? " is-active" : ""}"
             href="/projects/${encodeURIComponent(project.slug)}"${projectCurrent}>${escapeHtml(project.name)}</a>
         </div>
-        <ul class="sidebar-work-tree">${works}</ul>
+        <ul class="sidebar-work-tree" id="${workTreeId}">${works}</ul>
       </li>`;
     })
     .join("");
@@ -207,8 +213,12 @@ function layout(title, body, navigation) {
     .sidebar h2 { margin:.1rem .35rem .65rem; font-size:1rem; }
     .sidebar ul { list-style:none; margin:0; padding:0; }
     .sidebar-project-tree { display:grid; gap:.6rem; margin-top:.5rem !important; }
-    .sidebar-project-node { display:flex; gap:.3rem; align-items:flex-start; color:#61708a; }
+    .sidebar-project-node { display:flex; gap:.15rem; align-items:flex-start; color:#61708a; }
+    .sidebar-project-toggle { flex:0 0 auto; display:grid; place-items:center; width:1.5rem; height:1.7rem; padding:0; background:transparent; color:#61708a; }
+    .sidebar-project-toggle:hover { background:#eef3fa; color:#183f7e; }
+    .sidebar-project-toggle:focus-visible { outline:2px solid #2457a6; outline-offset:1px; }
     .sidebar-work-tree { display:grid; gap:.15rem; margin:.2rem 0 0 1.25rem !important; border-left:1px solid #dce1ea; padding-left:.35rem !important; }
+    .sidebar-work-tree[hidden] { display:none; }
     .sidebar-link { display:block; border-radius:6px; padding:.3rem .4rem; color:#34445f; text-decoration:none; overflow-wrap:anywhere; }
     .sidebar-link:hover { background:#eef3fa; color:#183f7e; }
     .sidebar-link.is-active { background:#dce8fa; color:#173f7e; font-weight:700; }
@@ -253,6 +263,46 @@ ${navigation}
 <main>${body}</main>
 </div>
 <script>
+  document.querySelectorAll("[data-sidebar-project-toggle]").forEach((toggle) => {
+    const workTree = document.getElementById(toggle.getAttribute("aria-controls"));
+    const symbol = toggle.querySelector("[data-sidebar-project-symbol]");
+    const project = toggle.dataset.project;
+    const projectName = toggle.dataset.projectName;
+    const storageKey = \`agents-chat-room.sidebar.project.\${project}.collapsed\`;
+    const setCollapsed = (collapsed) => {
+      toggle.setAttribute("aria-expanded", String(!collapsed));
+      toggle.setAttribute(
+        "aria-label",
+        \`\${projectName}の作業を\${collapsed ? "展開" : "折りたたむ"}\`,
+      );
+      workTree.hidden = collapsed;
+      symbol.textContent = collapsed ? "▸" : "▾";
+    };
+    let collapsed = false;
+    try {
+      collapsed = localStorage.getItem(storageKey) === "true";
+    } catch {
+      // Storage can be unavailable without preventing navigation.
+    }
+    setCollapsed(collapsed);
+    toggle.addEventListener("click", () => {
+      const nextCollapsed = toggle.getAttribute("aria-expanded") === "true";
+      setCollapsed(nextCollapsed);
+      try {
+        localStorage.setItem(storageKey, String(nextCollapsed));
+      } catch {
+        // The current page can still collapse even when persistence is unavailable.
+      }
+    });
+    toggle.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") {
+        return;
+      }
+      event.preventDefault();
+      toggle.click();
+    });
+  });
+
   document.addEventListener("keydown", (event) => {
     if (
       event.isComposing ||
