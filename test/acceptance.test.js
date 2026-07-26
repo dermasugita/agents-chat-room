@@ -1091,6 +1091,62 @@ test("two clients updating the same base revision produce one 200 and one 409", 
   });
 });
 
+test("document titles follow the current body heading and retain a stored fallback", async () => {
+  store.createDocument("sample", {
+    kind: "context",
+    title: "Stored context title",
+    body: "# Original heading\n\nRevision one.",
+    author: "designer",
+  });
+  store.createDocument("sample", {
+    kind: "adr",
+    title: "Stored fallback title",
+    body: "This document has no heading.",
+    author: "designer",
+  });
+
+  await withServer(async (base) => {
+    const updated = await request(
+      base,
+      "PUT",
+      "/api/v1/projects/sample/documents/context",
+      {
+        body: "# Current heading\n\nRevision two.",
+        base_revision: 1,
+        author: "designer",
+      },
+    );
+    assert.equal(updated.status, 200);
+
+    const list = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/documents",
+    );
+    assert.equal(list.status, 200);
+    assert.deepEqual(
+      list.body.documents.map(({ title }) => title),
+      ["Current heading", "Stored fallback title"],
+    );
+
+    const current = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/documents/context",
+    );
+    assert.equal(current.status, 200);
+    assert.equal(current.body.title, "Current heading");
+
+    const original = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/documents/context/revisions/1",
+    );
+    assert.equal(original.status, 200);
+    assert.equal(original.body.title, "Original heading");
+  });
+});
+
 test("concurrent message posts allocate a gapless unique sequence", async () => {
   await withServer(async (base) => {
     const count = 60;

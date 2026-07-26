@@ -41,6 +41,12 @@ function kebabCase(value) {
   return slug || "decision";
 }
 
+function documentTitle(body, fallback) {
+  const firstLine = String(body).split("\n", 1)[0].replace(/\r$/, "");
+  const heading = firstLine.startsWith("# ") ? firstLine.slice(2).trim() : "";
+  return heading || fallback;
+}
+
 function normalizeTime(value) {
   const parsed = new Date(value);
   assert(
@@ -1288,15 +1294,22 @@ export function createStore(database, options = {}) {
     const project = projectBySlug(projectSlug);
     return database
       .prepare(
-        `SELECT kind, slug, adr_number, title, current_revision, created_at
-         FROM document WHERE project_id = ?
+        `SELECT document.kind, document.slug, document.adr_number,
+                document.title AS stored_title, document.current_revision,
+                document.created_at, revision.body
+         FROM document
+         JOIN revision
+           ON revision.document_id = document.id
+          AND revision.revision = document.current_revision
+         WHERE document.project_id = ?
          ORDER BY CASE kind WHEN 'context' THEN 0 WHEN 'adr' THEN 1 ELSE 2 END,
-                  adr_number, slug`,
+                  document.adr_number, document.slug`,
       )
       .all(project.id)
-      .map((document) => ({
+      .map(({ stored_title: storedTitle, body, ...document }) => ({
         doc: documentIdentifier(document),
         ...document,
+        title: documentTitle(body, storedTitle),
       }));
   }
 
@@ -1326,7 +1339,7 @@ export function createStore(database, options = {}) {
       kind: document.kind,
       slug: document.slug,
       adr_number: document.adr_number,
-      title: document.title,
+      title: documentTitle(revision.body, document.title),
       body: revision.body,
       revision: revision.revision,
       updated_at: revision.created_at,
