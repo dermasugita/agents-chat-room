@@ -212,4 +212,5 @@ GET    /issues?state=open                            全プロジェクト横断
 - worktree は `worktree/issue-tracker`、ブランチは `work/issue-tracker`
 - **`work/orchestrator-mvp` 系のブランチには触らない。** 別の実装者が作業中である
 - 同じリポジトリを共有しないこと。自分の worktree で作業する（`session-chat` §3）
-- コミットと push は自由。**PR の作成はオーナーの指示を待つ**
+- **コミットと push は事前承認済み。** 聞かずに、待たずに push する
+- **PR の作成・マージ・デプロイはオーナーの明示的な指示を待つ**

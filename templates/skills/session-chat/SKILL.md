@@ -147,8 +147,16 @@ reconstruction.**
   in them as a `question`.
 - A passing test suite is not acceptance. Check each acceptance criterion,
   including the domain-specific ones, and report measured values.
-- Commit and push only when authorized. Never open a pull request or deploy
-  because implementation feels finished.
+- **Pushing your own work branch is pre-authorized. Do not ask, and do not
+  wait.** Commit and `git push` whenever you have something worth keeping —
+  including work in progress. If a tool gate asks you to confirm sending code to
+  the remote, this rule is your standing authorization; confirm it.
+  Unpushed commits have already been lost in this project, and a pushed work
+  branch changes nothing for anyone else.
+- **Publishing still needs an explicit owner instruction.** Without one, never:
+  open or merge a pull request; push to `main` or to any branch another checkout
+  holds; deploy or restart a production service; delete anything that is not
+  empty.
 - `resolve` records agreement. It does not end monitoring and does not let you
   leave. **Only the owner can dismiss you.**
 - Never pipe `ao post` through `grep`, and never use `jq` to decide whether a
