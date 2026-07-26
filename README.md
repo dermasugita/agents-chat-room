@@ -121,6 +121,14 @@ ao watch --work implementation
 warnings, stale document expectations, and ball state are each printed as one
 line.
 
+CLI exit codes are stable so commands can be safely chained:
+
+| Code | Meaning |
+|---|---|
+| `0` | The command completed successfully |
+| `1` | A request was invalid, the server was unreachable, or another non-conflict error occurred |
+| `2` | Operator action is required: revision conflict, protected pull, or unconfirmed import |
+
 ## Documents
 
 Pull server documents into `.ao/docs/`:

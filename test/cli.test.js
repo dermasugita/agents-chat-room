@@ -216,6 +216,24 @@ test("watch emits each message as one distinguishable line", async () => {
   assert.match(messageLine, /line one\\nline two/);
 });
 
+test("HTTP 400 exits 1 and explains the server rejection", async () => {
+  const repository = makeRepository("bad-request");
+  await injectRepository(repository, "bad-requester");
+  const result = await runCli(
+    [
+      "post",
+      "--type",
+      "question",
+      "--body",
+      "A question without a recipient",
+    ],
+    repository,
+  );
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /Server returned 400/);
+  assert.match(result.stderr, /question messages require at least one recipient/);
+});
+
 test("an owner web post appears in CLI watch output", async () => {
   const repository = makeRepository("owner-watch");
   await injectRepository(repository, "owner-watcher");
