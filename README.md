@@ -119,8 +119,10 @@ Configure the private server once for cold-start skills:
 ao configure --server http://127.0.0.1:7331
 ```
 
-This writes only `server_url` to `~/.ao/config.json`. CLI server resolution is
-`AO_SERVER_URL`, then that user setting, then repository `.ao/config.json`.
+This writes only the default `server_url` to `~/.ao/config.json`. CLI server
+resolution is `AO_SERVER_URL`, then repository `.ao/config.json`, then that
+user default. Only the environment variable overrides a repository-specific
+server.
 
 ## Join from the session-chat skill
 

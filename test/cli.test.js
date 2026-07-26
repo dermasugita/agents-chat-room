@@ -26,9 +26,12 @@ let database;
 let store;
 let application;
 let serverUrl;
+let isolatedHome;
 
 before(async () => {
   temporaryDirectory = mkdtempSync(join(tmpdir(), "ao-cli-test-"));
+  isolatedHome = join(temporaryDirectory, "isolated-home");
+  mkdirSync(isolatedHome, { recursive: true });
   database = createDatabase(join(temporaryDirectory, "server.sqlite"));
   store = createStore(database);
   store.createProject({ slug: "sample", name: "Sample" });
@@ -56,7 +59,12 @@ async function runCli(args, cwd, env = {}) {
   try {
     const result = await execFileAsync(process.execPath, [cliPath, ...args], {
       cwd,
-      env: { ...process.env, ...env },
+      env: {
+        ...process.env,
+        AO_SERVER_URL: "",
+        HOME: isolatedHome,
+        ...env,
+      },
       maxBuffer: 5 * 1024 * 1024,
     });
     return { ...result, code: 0 };
@@ -73,7 +81,7 @@ async function runPersistentCli(args, cwd, timeout = 250) {
   try {
     await execFileAsync(process.execPath, [cliPath, ...args], {
       cwd,
-      env: { ...process.env },
+      env: { ...process.env, AO_SERVER_URL: "", HOME: isolatedHome },
       maxBuffer: 5 * 1024 * 1024,
       timeout,
     });
@@ -87,7 +95,12 @@ async function runNodeScript(script, args, cwd, env = {}) {
   try {
     const result = await execFileAsync(process.execPath, [script, ...args], {
       cwd,
-      env: { ...process.env, ...env },
+      env: {
+        ...process.env,
+        AO_SERVER_URL: "",
+        HOME: isolatedHome,
+        ...env,
+      },
       maxBuffer: 5 * 1024 * 1024,
     });
     return { ...result, code: 0 };
@@ -105,7 +118,12 @@ async function runTimedNodeScript(script, args, cwd, env = {}, timeout = 250) {
   try {
     await execFileAsync(process.execPath, [script, ...args], {
       cwd,
-      env: { ...process.env, ...env },
+      env: {
+        ...process.env,
+        AO_SERVER_URL: "",
+        HOME: isolatedHome,
+        ...env,
+      },
       maxBuffer: 5 * 1024 * 1024,
       timeout,
     });
@@ -325,8 +343,11 @@ test("inject creates or reuses --work and the repository is immediately usable",
   );
 });
 
-test("server resolution is environment, user config, then repository config", () => {
+test("server resolution is environment, repository config, then user default", () => {
   const repository = makeRepository("server-resolution-repository");
+  const unconfiguredRepository = makeRepository(
+    "server-resolution-unconfigured-repository",
+  );
   const homeDirectory = makeRepository("server-resolution-home");
   mkdirSync(join(repository, ".ao"), { recursive: true });
   mkdirSync(join(homeDirectory, ".ao"), { recursive: true });
@@ -357,14 +378,19 @@ test("server resolution is environment, user config, then repository config", ()
       environment: {},
       homeDirectory,
     }).server_url,
-    "http://user.example",
-  );
-  assert.equal(
-    cliInternals.resolveServerUrl(parsed, {
-      environment: {},
-      homeDirectory: makeRepository("server-resolution-empty-home"),
-    }).server_url,
     "http://repository.example",
+  );
+  const unconfigured = cliInternals.parseArguments([
+    "rooms",
+    "--repo",
+    unconfiguredRepository,
+  ]);
+  assert.equal(
+    cliInternals.resolveServerUrl(unconfigured, {
+      environment: {},
+      homeDirectory,
+    }).server_url,
+    "http://user.example",
   );
 });
 
@@ -380,6 +406,25 @@ test("configure writes the one-time user server setting", async () => {
     JSON.parse(readFileSync(join(homeDirectory, ".ao/config.json"), "utf8")),
     { server_url: serverUrl },
   );
+});
+
+test("repository config overrides a conflicting user default in real CLI commands", async () => {
+  const repository = makeRepository("repository-server-priority");
+  await injectRepository(repository, "repository-priority-agent");
+  const conflictingHome = makeRepository("conflicting-user-default");
+  mkdirSync(join(conflictingHome, ".ao"), { recursive: true });
+  writeFileSync(
+    join(conflictingHome, ".ao/config.json"),
+    `${JSON.stringify({ server_url: "http://127.0.0.1:1" }, null, 2)}\n`,
+    "utf8",
+  );
+
+  const result = await runCli(["watch", "--once"], repository, {
+    AO_SERVER_URL: "",
+    HOME: conflictingHome,
+  });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(heartbeatFor("repository-priority-agent"), /^2026-/);
 });
 
 test("cold room join uses the declared slot, pulls context, and exposes the full thread", async () => {
@@ -1388,8 +1433,9 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(sessionSkill, /takes precedence/);
   assert.match(
     sessionSkill,
-    /AO_SERVER_URL.*~\/\.ao\/config\.json.*repository `\.ao\/config\.json`/s,
+    /AO_SERVER_URL.*repository `\.ao\/config\.json`.*~\/\.ao\/config\.json/s,
   );
+  assert.match(sessionSkill, /Only `AO_SERVER_URL` overrides a repository/);
   assert.match(sessionSkill, /Which room number should I join\?/);
   assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
   assert.match(sessionSkill, /handoff.*`CONTEXT\.md`.*every ADR/s);
@@ -1398,6 +1444,10 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(sessionSkill, /post a `status` start message/);
   assert.match(sessionSkill, /Never silently reuse an occupied implementer slot/);
   const designerSkill = templateContents[1];
+  assert.match(
+    designerSkill,
+    /AO_SERVER_URL.*repository\s+`\.ao\/config\.json`.*~\/\.ao\/config\.json/s,
+  );
   assert.match(
     designerSkill,
     /project name as the only required owner\s+input/,

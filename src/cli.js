@@ -47,8 +47,8 @@ Usage:
   ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
   ao import <repo> [--yes] [--project SLUG] [--name NAME]
 
-Server resolution order is AO_SERVER_URL, ~/.ao/config.json, then the
-repository .ao/config.json. Run ao configure once to write the user setting.
+Server resolution order is AO_SERVER_URL, repository .ao/config.json, then
+~/.ao/config.json. Run ao configure once to write the user default.
 `;
 
 class CliError extends Error {
@@ -224,16 +224,6 @@ function resolveServerUrl(parsed, options = {}) {
     return { server_url: fromEnvironment, source: "AO_SERVER_URL" };
   }
 
-  const userPath = userConfigPath({
-    environment,
-    homeDirectory: options.homeDirectory,
-  });
-  const userConfig = readJson(userPath);
-  const fromUser = validServerUrl(userConfig?.server_url);
-  if (fromUser) {
-    return { server_url: fromUser, source: userPath };
-  }
-
   const requestedRepository = option(parsed, "repo");
   const repository = requestedRepository
     ? resolve(String(requestedRepository))
@@ -249,10 +239,20 @@ function resolveServerUrl(parsed, options = {}) {
     return { server_url: fromRepository, source: repositoryPath };
   }
 
+  const userPath = userConfigPath({
+    environment,
+    homeDirectory: options.homeDirectory,
+  });
+  const userConfig = readJson(userPath);
+  const fromUser = validServerUrl(userConfig?.server_url);
+  if (fromUser) {
+    return { server_url: fromUser, source: userPath };
+  }
+
   throw new CliError(
-    `Cannot resolve the server URL. AO_SERVER_URL is not set; ${userPath} has no server_url; ${
+    `Cannot resolve the server URL. AO_SERVER_URL is not set; ${
       repositoryPath ?? "no repository .ao/config.json was found"
-    }. Run \`ao configure --server URL\` once.`,
+    }; ${userPath} has no server_url. Run \`ao configure --server URL\` once.`,
   );
 }
 

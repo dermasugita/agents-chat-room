@@ -21,10 +21,11 @@ Resolve the helper relative to this `SKILL.md`; the example is the
 repository-installed path, and a global skill must use its own absolute
 location without asking the owner. Use the matching `.claude/skills/` path in
 Claude Code. The helper resolves the CLI through `AO_CLI`, repository config,
-or PATH. The CLI resolves the server through `AO_SERVER_URL`, then
-`~/.ao/config.json`, then repository `.ao/config.json`. It uses `designer` as
-the self-declared identifier unless an existing designer config or
-`--identifier` supplies another value.
+or PATH. The CLI resolves the server through `AO_SERVER_URL`, then repository
+`.ao/config.json`, then the user default in `~/.ao/config.json`. Only the
+environment variable overrides a repository setting. It uses `designer` as the
+self-declared identifier unless an existing designer config or `--identifier`
+supplies another value.
 
 If the owner invoked the skill without a project, run the helper without
 arguments, show the project list, and ask only which project to use. Once a

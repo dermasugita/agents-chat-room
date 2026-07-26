@@ -24,8 +24,9 @@ or bootstrap prompt. Resolve those values through this workflow:
    location without asking the owner. Use the matching `.claude/skills/` path
    in Claude Code. The helper resolves the CLI through `AO_CLI`, an existing
    repository config, or PATH. The CLI resolves the server in this exact order:
-   `AO_SERVER_URL`, the one-time user setting in `~/.ao/config.json`, then
-   repository `.ao/config.json`.
+   `AO_SERVER_URL`, repository `.ao/config.json`, then the one-time user
+   default in `~/.ao/config.json`. Only `AO_SERVER_URL` overrides a repository
+   setting.
 2. Show the complete numbered output and ask exactly one short question:
    “Which room number should I join?” Do not ask for any other value when the
    room has an implementer slot. A `presence=present` line is a duplicate-agent
