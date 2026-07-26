@@ -210,6 +210,36 @@ export function createDatabase(path = ":memory:") {
       );
     }
   };
+  const backfillOpenIssueChanges = () => {
+    const openIssues = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE issue.state = 'open'
+         ORDER BY issue.id`,
+      )
+      .all();
+    const insert = database.prepare(
+      `INSERT INTO issue_change(
+         project_id, issue_id, change_type, issue_json, changed_at
+       ) VALUES (?, ?, 'created', ?, ?)`,
+    );
+    for (const row of openIssues) {
+      const {
+        id: issueId,
+        project_id: projectId,
+        project_slug: project,
+        project_name: projectName,
+        ...issue
+      } = row;
+      insert.run(
+        projectId,
+        issueId,
+        JSON.stringify({ project, project_name: projectName, ...issue }),
+        row.created_at,
+      );
+    }
+  };
   const migrate = (operation) => {
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -239,6 +269,7 @@ export function createDatabase(path = ":memory:") {
       addAttendanceMode();
       recordVersion(4);
       database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
       recordVersion(5);
     });
   } else if (current === 2) {
@@ -248,6 +279,7 @@ export function createDatabase(path = ":memory:") {
       addAttendanceMode();
       recordVersion(4);
       database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
       recordVersion(5);
     });
   } else if (current === 3) {
@@ -255,11 +287,13 @@ export function createDatabase(path = ":memory:") {
       addAttendanceMode();
       recordVersion(4);
       database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
       recordVersion(5);
     });
   } else if (current === 4) {
     migrate(() => {
       database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
       recordVersion(5);
     });
   } else if (current !== SCHEMA_VERSION) {

@@ -344,7 +344,7 @@ test("schema version 3 preserves issues while adding attendance mode", () => {
   migrated.close();
 });
 
-test("schema version 4 adds durable issue delivery without replaying old backlog", () => {
+test("schema version 4 backfills open issues into durable delivery exactly once", () => {
   const path = join(temporaryDirectory, "schema-v4.sqlite");
   const legacy = createDatabase(path);
   const legacyStore = createStore(legacy, {
@@ -373,17 +373,28 @@ test("schema version 4 adds durable issue delivery without replaying old backlog
   const migratedStore = createStore(migrated, {
     clock: () => new Date("2026-07-26T00:01:00.000Z"),
   });
-  assert.deepEqual(migratedStore.issueChanges("legacy-v4", 0), {
-    issues: [],
-    issue_cursor: 0,
-  });
+  const backfilled = migratedStore.issueChanges("legacy-v4", 0);
+  assert.equal(backfilled.issues.length, 1);
+  assert.equal(backfilled.issues[0].change, "created");
+  assert.equal(backfilled.issues[0].changed_at, issue.created_at);
+  assert.deepEqual(backfilled.issues[0].issue, issue);
+  assert.deepEqual(
+    migratedStore.issueChanges("legacy-v4", backfilled.issue_cursor),
+    {
+      issues: [],
+      issue_cursor: backfilled.issue_cursor,
+    },
+  );
   migratedStore.closeIssue("legacy-v4", issue.number, {
     reason: "State changed after migration",
     origin_project: "legacy-v4",
     origin_identifier: "designer",
     origin_role: "designer",
   });
-  const delivered = migratedStore.issueChanges("legacy-v4", 0);
+  const delivered = migratedStore.issueChanges(
+    "legacy-v4",
+    backfilled.issue_cursor,
+  );
   assert.equal(delivered.issues.length, 1);
   assert.equal(delivered.issues[0].change, "closed");
   assert.equal(delivered.issues[0].issue.state, "closed");
