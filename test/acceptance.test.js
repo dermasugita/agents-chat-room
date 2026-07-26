@@ -101,14 +101,14 @@ test("schema version 1 migrates through issues and attendance without losing wor
   const migrated = createDatabase(path);
   assert.equal(
     migrated.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version,
-    4,
+    5,
   );
   assert.deepEqual(
     migrated
       .prepare("SELECT version FROM schema_meta ORDER BY version")
       .all()
       .map(({ version }) => version),
-    [1, 2, 3, 4],
+    [1, 2, 3, 4, 5],
   );
   assert.deepEqual(
     {
@@ -194,14 +194,14 @@ test("schema version 2 migrates issues and attendance without losing participant
   const migrated = createDatabase(path);
   assert.equal(
     migrated.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version,
-    4,
+    5,
   );
   assert.deepEqual(
     migrated
       .prepare("SELECT version FROM schema_meta ORDER BY version")
       .all()
       .map(({ version }) => version),
-    [2, 3, 4],
+    [2, 3, 4, 5],
   );
   assert.equal(
     migrated.prepare("SELECT name FROM project WHERE slug = 'legacy-v2'").get().name,
@@ -324,7 +324,7 @@ test("schema version 3 preserves issues while adding attendance mode", () => {
       .prepare("SELECT version FROM schema_meta ORDER BY version")
       .all()
       .map(({ version }) => version),
-    [3, 4],
+    [3, 4, 5],
   );
   assert.deepEqual(
     { ...migrated.prepare("SELECT title, state FROM issue").get() },
@@ -340,6 +340,64 @@ test("schema version 3 preserves issues while adding attendance mode", () => {
     "self-driven",
   );
   assert.equal(migrated.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
+  assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
+  migrated.close();
+});
+
+test("schema version 4 backfills open issues into durable delivery exactly once", () => {
+  const path = join(temporaryDirectory, "schema-v4.sqlite");
+  const legacy = createDatabase(path);
+  const legacyStore = createStore(legacy, {
+    clock: () => new Date("2026-07-26T00:00:00.000Z"),
+  });
+  legacyStore.createProject({ slug: "legacy-v4", name: "Legacy v4" });
+  const issue = legacyStore.createIssue("legacy-v4", {
+    title: "Existing backlog",
+    body: "This is read once at startup.",
+    origin_project: "legacy-v4",
+    origin_identifier: "designer",
+    origin_role: "designer",
+  });
+  legacy.exec("DROP TABLE issue_change");
+  legacy.exec("UPDATE schema_meta SET version = 4 WHERE version = 5");
+  legacy.close();
+
+  const migrated = createDatabase(path);
+  assert.deepEqual(
+    migrated
+      .prepare("SELECT version FROM schema_meta ORDER BY version")
+      .all()
+      .map(({ version }) => version),
+    [4, 5],
+  );
+  const migratedStore = createStore(migrated, {
+    clock: () => new Date("2026-07-26T00:01:00.000Z"),
+  });
+  const backfilled = migratedStore.issueChanges("legacy-v4", 0);
+  assert.equal(backfilled.issues.length, 1);
+  assert.equal(backfilled.issues[0].change, "created");
+  assert.equal(backfilled.issues[0].changed_at, issue.created_at);
+  assert.deepEqual(backfilled.issues[0].issue, issue);
+  assert.deepEqual(
+    migratedStore.issueChanges("legacy-v4", backfilled.issue_cursor),
+    {
+      issues: [],
+      issue_cursor: backfilled.issue_cursor,
+    },
+  );
+  migratedStore.closeIssue("legacy-v4", issue.number, {
+    reason: "State changed after migration",
+    origin_project: "legacy-v4",
+    origin_identifier: "designer",
+    origin_role: "designer",
+  });
+  const delivered = migratedStore.issueChanges(
+    "legacy-v4",
+    backfilled.issue_cursor,
+  );
+  assert.equal(delivered.issues.length, 1);
+  assert.equal(delivered.issues[0].change, "closed");
+  assert.equal(delivered.issues[0].issue.state, "closed");
   assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
   migrated.close();
 });
@@ -469,6 +527,33 @@ test("issues support cross-project origin, comments, state changes, filters, and
     assert.equal(reopened.body.closed_by, null);
     assert.equal(reopened.body.close_reason, null);
 
+    const changes = await request(
+      base,
+      "GET",
+      "/api/v1/projects/target/issue-changes?since=0",
+    );
+    assert.equal(changes.status, 200);
+    assert.equal(changes.body.issues.length, count + 2);
+    assert.deepEqual(
+      changes.body.issues.slice(-2).map(({ change, issue }) => ({
+        change,
+        state: issue.state,
+      })),
+      [
+        { change: "closed", state: "closed" },
+        { change: "reopened", state: "open" },
+      ],
+    );
+    const noRepeat = await request(
+      base,
+      "GET",
+      `/api/v1/projects/target/issue-changes?since=${changes.body.issue_cursor}`,
+    );
+    assert.deepEqual(noRepeat.body, {
+      issues: [],
+      issue_cursor: changes.body.issue_cursor,
+    });
+
     const deletion = await request(
       base,
       "DELETE",
@@ -500,6 +585,54 @@ test("issues support cross-project origin, comments, state changes, filters, and
       messages: beforeIssue.messages,
     },
   );
+});
+
+test("issue delivery rides a passive poll without adding heartbeat or ball effects", () => {
+  const baseline = store.poll(
+    "sample",
+    "work-one",
+    "delivery-observer",
+    "implementer",
+    0,
+    true,
+    0,
+  );
+  const heartbeatAt = baseline.heartbeat_at;
+  currentTime = new Date(currentTime.getTime() + 60_000);
+  store.createIssue("sample", {
+    title: "Passive delivery",
+    body: "Delivery must not count as attention.",
+    origin_project: "sample",
+    origin_identifier: "designer",
+    origin_role: "designer",
+  });
+
+  const delivered = store.poll(
+    "sample",
+    "work-one",
+    "delivery-observer",
+    undefined,
+    0,
+    false,
+    0,
+  );
+  assert.equal(delivered.issues.length, 1);
+  assert.equal(delivered.issues[0].change, "created");
+  assert.equal(delivered.heartbeat_at, heartbeatAt);
+  assert.equal(delivered.your_ball.has_ball, false);
+  assert.deepEqual(delivered.abandoned, []);
+
+  const noRepeat = store.poll(
+    "sample",
+    "work-one",
+    "delivery-observer",
+    undefined,
+    0,
+    false,
+    delivered.issue_cursor,
+  );
+  assert.deepEqual(noRepeat.issues, []);
+  assert.equal(noRepeat.heartbeat_at, heartbeatAt);
 });
 
 test("room listing exposes the expected implementer and independent presence state", async () => {
@@ -749,6 +882,7 @@ test("project deletion requires confirmation and reports every cascaded row", as
         revisions: 3,
         issues: 1,
         issue_comments: 1,
+        issue_changes: 1,
         message_recipients: 1,
         message_refs: 1,
         message_expectations: 1,
@@ -887,6 +1021,7 @@ test("document deletion requires confirmation, removes revisions, and releases a
         revisions: 2,
         issues: 0,
         issue_comments: 0,
+        issue_changes: 0,
         message_recipients: 0,
         message_refs: 0,
         message_expectations: 1,
@@ -985,6 +1120,7 @@ test("work deletion removes its thread and documents but preserves the project",
         revisions: 1,
         issues: 0,
         issue_comments: 0,
+        issue_changes: 0,
         message_recipients: 1,
         message_refs: 1,
         message_expectations: 2,

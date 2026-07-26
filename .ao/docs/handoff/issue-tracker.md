@@ -1,5 +1,5 @@
 <!-- AgentOrchestrator: これは写しです。正本はサーバ側 DB にあります。
-     revision=7 / doc=handoff/issue-tracker / pulled=2026-07-26T14:03:12.075Z
+     revision=8 / doc=handoff/issue-tracker / pulled=2026-07-26T14:46:05.710Z
      編集しても `ao push` するまで正本に反映されません。`ao pull` で失われます。 -->
 # 課題トラッカー 実装引き継ぎ文書
 

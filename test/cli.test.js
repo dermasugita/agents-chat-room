@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import {
   chmodSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -219,6 +220,12 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     ".agents/skills/session-chat/scripts/ball-check.mjs",
     ".claude/skills/session-chat/scripts/join-room.mjs",
     ".agents/skills/session-chat/scripts/join-room.mjs",
+    ".claude/skills/session-chat/scripts/claude-code-designer-monitor.sh",
+    ".agents/skills/session-chat/scripts/claude-code-designer-monitor.sh",
+    ".claude/skills/session-chat/scripts/codex-implementer-monitor.sh",
+    ".agents/skills/session-chat/scripts/codex-implementer-monitor.sh",
+    ".claude/skills/session-chat/scripts/monitor.mjs",
+    ".agents/skills/session-chat/scripts/monitor.mjs",
     ".claude/skills/session-chat/scripts/lib/ao-cli.mjs",
     ".agents/skills/session-chat/scripts/lib/ao-cli.mjs",
     ".claude/skills/design-handoff/scripts/designer-start.mjs",
@@ -273,6 +280,9 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     "self-driven-loop.mjs",
     "ball-check.mjs",
     "join-room.mjs",
+    "monitor.mjs",
+    "claude-code-designer-monitor.sh",
+    "codex-implementer-monitor.sh",
   ]) {
     const claude = join(
       repository,
@@ -699,6 +709,44 @@ test("configure writes the one-time user server setting", async () => {
     JSON.parse(readFileSync(join(homeDirectory, ".ao/config.json"), "utf8")),
     { server_url: serverUrl },
   );
+});
+
+test("CLI and server report one package version and stale clients warn automatically", async () => {
+  const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+  const version = await runCli(["version"], temporaryDirectory);
+  assert.equal(version.code, 0, version.stderr);
+  assert.equal(version.stdout.trim(), packageJson.version);
+  const notes = await runCli(["version", "--notes"], temporaryDirectory);
+  assert.equal(notes.code, 0, notes.stderr);
+  assert.match(notes.stdout, new RegExp(`^## \\[${packageJson.version}\\]`, "m"));
+  assert.match(notes.stdout, /Deliver new issue and issue-state changes/);
+
+  const healthResponse = await fetch(`${serverUrl}/api/v1/health`);
+  assert.equal(healthResponse.headers.get("x-agents-chat-room-version"), packageJson.version);
+  assert.equal((await healthResponse.json()).version, packageJson.version);
+
+  const oldRoot = makeRepository("old-cli");
+  cpSync(resolve("src"), join(oldRoot, "src"), { recursive: true });
+  cpSync(resolve("bin"), join(oldRoot, "bin"), { recursive: true });
+  writeFileSync(
+    join(oldRoot, "package.json"),
+    `${JSON.stringify({ ...packageJson, version: "0.1.0" }, null, 2)}\n`,
+    "utf8",
+  );
+  const old = await runNodeScript(
+    join(oldRoot, "bin/ao.js"),
+    ["rooms", "--json"],
+    temporaryDirectory,
+    { AO_SERVER_URL: serverUrl },
+  );
+  assert.equal(old.code, 0, old.stderr);
+  assert.match(
+    old.stderr,
+    new RegExp(
+      `WARNING ao CLI 0\\.1\\.0 is older than server ${packageJson.version.replaceAll(".", "\\.")}`,
+    ),
+  );
+  assert.match(old.stderr, /scripts\/install-cli\.mjs/);
 });
 
 test("user config identity is warned, ignored, and removed by configure", async () => {
@@ -1174,6 +1222,7 @@ test("delete CLI commands stay on the repository server and report protected cle
     revisions: 0,
     issues: 0,
     issue_comments: 0,
+    issue_changes: 0,
     message_recipients: 0,
     message_refs: 0,
     message_expectations: 0,
@@ -1852,6 +1901,90 @@ test("watch emits each message as one distinguishable line", async () => {
   assert.match(messageLine, /line one\\nline two/);
 });
 
+test("watch delivers issue changes once and persists a client-side cursor", async () => {
+  const repository = makeRepository("issue-watcher");
+  await injectRepository(repository, "issue-watcher");
+  const identity = {
+    origin_project: "sample",
+    origin_identifier: "designer",
+    origin_role: "designer",
+    origin_work: "work-one",
+  };
+  const issue = store.createIssue("sample", {
+    title: "Delivered backlog",
+    body: "Watch should carry this.",
+    ...identity,
+  });
+
+  const first = await runCli(
+    ["watch", "--once", "--since", "9999"],
+    repository,
+  );
+  assert.equal(first.code, 0, first.stderr);
+  assert.match(
+    first.stdout,
+    /^ISSUE project=sample number=\d+ change=created state=open title="Delivered backlog"$/m,
+  );
+  assert.doesNotMatch(first.stdout, /^BALL /m);
+  const stateAfterFirst = JSON.parse(
+    readFileSync(join(repository, ".ao/state.json"), "utf8"),
+  );
+  assert.ok(stateAfterFirst.issue_changes.sample["issue-watcher"] > 0);
+
+  const repeated = await runCli(
+    ["watch", "--once", "--since", "9999"],
+    repository,
+  );
+  assert.equal(repeated.code, 0, repeated.stderr);
+  assert.doesNotMatch(repeated.stdout, /^ISSUE /m);
+
+  const sharedRepositoryPeer = await runCli(
+    ["watch", "--once", "--since", "9999"],
+    repository,
+    { AO_IDENTIFIER: "issue-watcher-peer", AO_ROLE: "implementer" },
+  );
+  assert.equal(sharedRepositoryPeer.code, 0, sharedRepositoryPeer.stderr);
+  assert.match(sharedRepositoryPeer.stdout, /ISSUE .*change=created state=open/);
+  const sharedState = JSON.parse(
+    readFileSync(join(repository, ".ao/state.json"), "utf8"),
+  );
+  assert.ok(sharedState.issue_changes.sample["issue-watcher"] > 0);
+  assert.ok(sharedState.issue_changes.sample["issue-watcher-peer"] > 0);
+
+  store.addIssueComment("sample", issue.number, {
+    body: "Comments are not state changes.",
+    ...identity,
+  });
+  const commentOnly = await runCli(
+    ["watch", "--once", "--since", "9999"],
+    repository,
+  );
+  assert.doesNotMatch(commentOnly.stdout, /^ISSUE /m);
+
+  store.closeIssue("sample", issue.number, {
+    reason: "Done",
+    ...identity,
+  });
+  const closed = await runCli(
+    ["watch", "--once", "--since", "9999"],
+    repository,
+  );
+  assert.match(closed.stdout, /ISSUE .*change=closed state=closed/);
+
+  store.reopenIssue("sample", issue.number);
+  const reopened = await runCli(
+    ["watch", "--project", "--once", "--since", "9999"],
+    repository,
+  );
+  assert.equal(reopened.code, 0, reopened.stderr);
+  assert.match(
+    reopened.stdout,
+    /^ISSUE project=sample number=\d+ change=reopened state=open /m,
+  );
+  assert.equal(reopened.stdout.match(/^ISSUE /gm)?.length, 1);
+  assert.doesNotMatch(reopened.stdout, /^WORK .* ISSUE /m);
+});
+
 test("watch distinguishes awaiting activation from abandonment", async () => {
   const repository = makeRepository("activation-watcher");
   await injectRepository(repository, "activation-watcher");
@@ -2041,6 +2174,26 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
   );
   assert.equal(pathFallback.code, 0, pathFallback.stderr);
   assert.match(pathFallback.stdout, /^PATH_FALLBACK post --type status/);
+
+  const monitorCli = join(repository, "monitor-ao.mjs");
+  writeFileSync(
+    monitorCli,
+    `process.stdout.write("ISSUE passthrough " + process.argv.slice(2).join(" ") + "\\n");\n`,
+    "utf8",
+  );
+  for (const [script, expected] of [
+    ["codex-implementer-monitor.sh", "watch --once"],
+    ["claude-code-designer-monitor.sh", "watch --project --once"],
+  ]) {
+    const monitoredOnce = await execFileAsync(join(scriptRoot, script), [], {
+      cwd: repository,
+      env: { ...process.env, AO_CLI: monitorCli },
+    });
+    assert.equal(monitoredOnce.stdout.trim(), `ISSUE passthrough ${expected}`);
+    const content = readFileSync(join(scriptRoot, script), "utf8");
+    assert.match(content, /^#!\/usr\/bin\/env bash\nset -euo pipefail\n/);
+    assert.doesNotMatch(content, /jq|\/Users\//);
+  }
 
   const posted = await runNodeScript(
     join(scriptRoot, "post-safe.mjs"),
@@ -2506,6 +2659,26 @@ test("service skill templates contain none of the retired file protocol", () => 
     /join-room\.mjs <NUMBER> --repo worktree\/<WORK>\s*\ncd worktree\/<WORK>/,
   );
   assert.match(sessionSkill, /ls \.claude\/skills \.agents\/skills/);
+  // step 3 が cd で終わると step 4 の「メインチェックアウトに留まれ」と矛盾する。
+  // 一度その矛盾を書いたので、cd は step 4 の1箇所だけであることを固定する。
+  {
+    const step3 = sessionSkill.slice(
+      sessionSkill.indexOf("### 3. Create your own git worktree"),
+      sessionSkill.indexOf("### 4. Install the skills"),
+    );
+    assert.doesNotMatch(step3, /cd worktree/);
+    assert.match(step3, /Do not `cd` yet/);
+    assert.equal((sessionSkill.match(/^cd worktree\/<WORK>$/gm) ?? []).length, 1);
+  }
+  // 同一性は部屋番号から導く。ao inject を代わりに使わせない。
+  assert.match(
+    sessionSkill,
+    /Use this helper, not `ao inject`/,
+  );
+  assert.match(
+    sessionSkill,
+    /identity comes from the room's declared implementer slot/,
+  );
   assert.match(
     sessionSkill,
     /### 6\. Register a periodic self-check — mandatory/,

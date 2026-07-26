@@ -5,12 +5,14 @@ import { execFile } from "node:child_process";
 import {
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import {
@@ -109,9 +111,10 @@ function copyRuntime(destination) {
 
 async function runInstalled(cliPath, cliArgs, cwd, environment) {
   try {
+    const directScript = cliPath.endsWith(".js");
     const result = await execFileAsync(
-      process.execPath,
-      [cliPath, ...cliArgs],
+      directScript ? process.execPath : cliPath,
+      directScript ? [cliPath, ...cliArgs] : cliArgs,
       {
         cwd,
         env: environment,
@@ -129,7 +132,7 @@ async function runInstalled(cliPath, cliArgs, cwd, environment) {
   }
 }
 
-async function smokeInstalledCli(destination) {
+async function smokeInstalledCli(destination, shimPath) {
   const smokeRoot = mkdtempSync(
     join(tmpdir(), "agents-chat-room-cli-smoke-"),
   );
@@ -169,7 +172,7 @@ async function smokeInstalledCli(destination) {
     });
     const serverUrl =
       `http://127.0.0.1:${application.server.address().port}`;
-    const cliPath = join(destination, "bin", "ao.js");
+    const cliPath = shimPath;
     const environment = {
       ...process.env,
       HOME: isolatedHome,
@@ -245,8 +248,34 @@ async function smokeInstalledCli(destination) {
 const suffix = `${process.pid}-${randomUUID()}`;
 const staging = `${options.destination}.installing-${suffix}`;
 const backup = `${options.destination}.previous-${suffix}`;
+const shimDirectory = join(homedir(), ".local", "bin");
+const shimPath = join(shimDirectory, "ao");
+const shimStaging = join(shimDirectory, `.ao.installing-${suffix}`);
+const shimBackup = join(shimDirectory, `.ao.previous-${suffix}`);
 let destinationReplaced = false;
 let previousMoved = false;
+let shimReplaced = false;
+let previousShimMoved = false;
+
+function pathExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function installShim(destination) {
+  mkdirSync(shimDirectory, { recursive: true, mode: 0o755 });
+  symlinkSync(join(destination, "bin", "ao.js"), shimStaging);
+  if (pathExists(shimPath)) {
+    renameSync(shimPath, shimBackup);
+    previousShimMoved = true;
+  }
+  renameSync(shimStaging, shimPath);
+  shimReplaced = true;
+}
 
 try {
   mkdirSync(dirname(options.destination), { recursive: true, mode: 0o755 });
@@ -257,18 +286,32 @@ try {
   }
   renameSync(staging, options.destination);
   destinationReplaced = true;
-  const smoke = await smokeInstalledCli(options.destination);
+  installShim(options.destination);
+  const smoke = await smokeInstalledCli(options.destination, shimPath);
   if (previousMoved) {
     rmSync(backup, { recursive: true, force: true });
     previousMoved = false;
   }
+  if (previousShimMoved) {
+    rmSync(shimBackup, { recursive: true, force: true });
+    previousShimMoved = false;
+  }
   console.log(
     JSON.stringify({
       installed: options.destination,
+      shim: shimPath,
       smoke,
     }),
   );
 } catch (error) {
+  if (shimReplaced && pathExists(shimPath)) {
+    rmSync(shimPath, { force: true });
+    shimReplaced = false;
+  }
+  if (previousShimMoved && pathExists(shimBackup)) {
+    renameSync(shimBackup, shimPath);
+    previousShimMoved = false;
+  }
   if (destinationReplaced && existsSync(options.destination)) {
     rmSync(options.destination, { recursive: true, force: true });
   }
@@ -284,5 +327,11 @@ try {
   }
   if (existsSync(backup)) {
     rmSync(backup, { recursive: true, force: true });
+  }
+  if (pathExists(shimStaging)) {
+    rmSync(shimStaging, { force: true });
+  }
+  if (pathExists(shimBackup)) {
+    rmSync(shimBackup, { force: true });
   }
 }

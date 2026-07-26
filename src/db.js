@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 const ISSUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS issue (
@@ -39,6 +39,20 @@ CREATE INDEX IF NOT EXISTS idx_issue_project_state_number
   ON issue(project_id, state, number);
 CREATE INDEX IF NOT EXISTS idx_issue_comment_issue_seq
   ON issue_comment(issue_id, seq);
+`;
+
+const ISSUE_CHANGE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS issue_change (
+  id            INTEGER PRIMARY KEY,
+  project_id    INTEGER NOT NULL REFERENCES project(id),
+  issue_id      INTEGER NOT NULL REFERENCES issue(id),
+  change_type   TEXT NOT NULL CHECK (change_type IN ('created','closed','reopened')),
+  issue_json    TEXT NOT NULL,
+  changed_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_change_project_id
+  ON issue_change(project_id, id);
 `;
 
 const SCHEMA = `
@@ -160,6 +174,7 @@ CREATE INDEX IF NOT EXISTS idx_message_reply ON message(work_id, reply_to_seq, f
 CREATE INDEX IF NOT EXISTS idx_message_to_identifier ON message_to(identifier, message_id);
 CREATE INDEX IF NOT EXISTS idx_participant_work ON participant(work_id, identifier);
 ${ISSUE_SCHEMA}
+${ISSUE_CHANGE_SCHEMA}
 `;
 
 export function createDatabase(path = ":memory:") {
@@ -195,6 +210,36 @@ export function createDatabase(path = ":memory:") {
       );
     }
   };
+  const backfillOpenIssueChanges = () => {
+    const openIssues = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE issue.state = 'open'
+         ORDER BY issue.id`,
+      )
+      .all();
+    const insert = database.prepare(
+      `INSERT INTO issue_change(
+         project_id, issue_id, change_type, issue_json, changed_at
+       ) VALUES (?, ?, 'created', ?, ?)`,
+    );
+    for (const row of openIssues) {
+      const {
+        id: issueId,
+        project_id: projectId,
+        project_slug: project,
+        project_name: projectName,
+        ...issue
+      } = row;
+      insert.run(
+        projectId,
+        issueId,
+        JSON.stringify({ project, project_name: projectName, ...issue }),
+        row.created_at,
+      );
+    }
+  };
   const migrate = (operation) => {
     database.exec("BEGIN IMMEDIATE");
     try {
@@ -223,6 +268,9 @@ export function createDatabase(path = ":memory:") {
       recordVersion(3);
       addAttendanceMode();
       recordVersion(4);
+      database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
+      recordVersion(5);
     });
   } else if (current === 2) {
     migrate(() => {
@@ -230,11 +278,23 @@ export function createDatabase(path = ":memory:") {
       recordVersion(3);
       addAttendanceMode();
       recordVersion(4);
+      database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
+      recordVersion(5);
     });
   } else if (current === 3) {
     migrate(() => {
       addAttendanceMode();
       recordVersion(4);
+      database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
+      recordVersion(5);
+    });
+  } else if (current === 4) {
+    migrate(() => {
+      database.exec(ISSUE_CHANGE_SCHEMA);
+      backfillOpenIssueChanges();
+      recordVersion(5);
     });
   } else if (current !== SCHEMA_VERSION) {
     database.close();
