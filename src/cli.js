@@ -405,6 +405,32 @@ function warnIdentityOverwrite(operation, configPath, existingConfig, identity) 
   );
 }
 
+function warnRepositoryTargetOverwrite(
+  operation,
+  configPath,
+  existingConfig,
+  nextConfig,
+) {
+  const changes = [];
+  for (const field of ["project", "work"]) {
+    const existing = validIdentityValue(existingConfig?.[field]);
+    const next = validIdentityValue(nextConfig?.[field]);
+    if (existing !== null && existing !== next) {
+      changes.push(
+        `${field} ${JSON.stringify(existing)} -> ${
+          next === null ? "<unset>" : JSON.stringify(next)
+        }`,
+      );
+    }
+  }
+  if (changes.length === 0) {
+    return;
+  }
+  console.error(
+    `WARNING: ao ${operation} will overwrite repository target in ${configPath}: ${changes.join(", ")}. Pass --project/--work only when intentionally moving this repository to another room.`,
+  );
+}
+
 function warnIgnoredUserIdentity(configPath, config, { removing = false } = {}) {
   const ignoredIdentity = [
     validIdentityValue(config?.identifier)
@@ -1658,13 +1684,18 @@ async function inject(parsed) {
   if (!existsSync(repository) || !statSync(repository).isDirectory()) {
     throw new CliError(`Repository directory not found: ${repository}`);
   }
-  const project =
-    option(parsed, "project") ??
-    basename(repository)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, "-")
-      .replace(/^-|-$/g, "");
-  const selectedWork = option(parsed, "work");
+  const configPath = join(repository, ".ao", "config.json");
+  const existingConfig = readJson(configPath, {});
+  const project = hasOption(parsed, "project")
+    ? requireOption(parsed, "project")
+    : validIdentityValue(existingConfig.project) ??
+      basename(repository)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-|-$/g, "");
+  const selectedWork = hasOption(parsed, "work")
+    ? option(parsed, "work")
+    : validIdentityValue(existingConfig.work);
   if (
     hasOption(parsed, "work") &&
     (selectedWork === true || selectedWork === "")
@@ -1677,15 +1708,16 @@ async function inject(parsed) {
   const selectedWorkTitle = hasOption(parsed, "work-title")
     ? requireOption(parsed, "work-title")
     : undefined;
-  const configPath = join(repository, ".ao", "config.json");
-  const existingConfig = readJson(configPath, {});
   const identity = resolveIdentity(parsed, existingConfig);
   let serverUrl = option(parsed, "server");
   if (serverUrl === undefined) {
-    try {
-      serverUrl = resolveServerUrl(parsed).server_url;
-    } catch {
-      serverUrl = "http://127.0.0.1:7331";
+    serverUrl = validServerUrl(existingConfig.server_url);
+    if (serverUrl === null) {
+      try {
+        serverUrl = resolveServerUrl(parsed).server_url;
+      } catch {
+        serverUrl = "http://127.0.0.1:7331";
+      }
     }
   }
   const config = {
@@ -1740,6 +1772,7 @@ async function inject(parsed) {
   }
 
   warnIdentityOverwrite("inject", configPath, existingConfig, identity);
+  warnRepositoryTargetOverwrite("inject", configPath, existingConfig, config);
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
   writeJson(configPath, config);
   const context = {

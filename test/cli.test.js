@@ -331,6 +331,82 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
   }
 });
 
+test("inject preserves an existing project and work unless explicitly changed", async () => {
+  store.createProject({ slug: "preserved-project", name: "Preserved project" });
+  store.createWork("preserved-project", {
+    slug: "preserved-work",
+    title: "Preserved work",
+  });
+  const repository = makeRepository("different-directory-name");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: serverUrl,
+        project: "preserved-project",
+        work: "preserved-work",
+        identifier: "preserved-agent",
+        role: "implementer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const reinjected = await runCli(
+    ["inject", repository],
+    temporaryDirectory,
+  );
+  assert.equal(reinjected.code, 0, reinjected.stderr);
+  assert.doesNotMatch(reinjected.stderr, /overwrite repository target/);
+  assert.deepEqual(
+    {
+      project: JSON.parse(
+        readFileSync(join(repository, ".ao/config.json"), "utf8"),
+      ).project,
+      work: JSON.parse(
+        readFileSync(join(repository, ".ao/config.json"), "utf8"),
+      ).work,
+    },
+    {
+      project: "preserved-project",
+      work: "preserved-work",
+    },
+  );
+
+  const changed = await runCli(
+    [
+      "inject",
+      repository,
+      "--project",
+      "replacement-project",
+      "--work",
+      "replacement-work",
+    ],
+    temporaryDirectory,
+  );
+  assert.equal(changed.code, 0, changed.stderr);
+  assert.match(
+    changed.stderr,
+    /WARNING: ao inject will overwrite repository target/,
+  );
+  assert.match(
+    changed.stderr,
+    /project "preserved-project" -> "replacement-project"/,
+  );
+  assert.match(
+    changed.stderr,
+    /work "preserved-work" -> "replacement-work"/,
+  );
+  const changedConfig = JSON.parse(
+    readFileSync(join(repository, ".ao/config.json"), "utf8"),
+  );
+  assert.equal(changedConfig.project, "replacement-project");
+  assert.equal(changedConfig.work, "replacement-work");
+});
+
 test("inject creates or reuses --work and the repository is immediately usable", async () => {
   const repository = makeRepository("inject-work");
   const injectArgs = [
@@ -2101,7 +2177,11 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     noAdditionalCliSetup,
   );
   assert.equal(ball.code, 0, ball.stderr);
-  assert.match(ball.stdout, /^BALL has_ball=true idle=false reasons=/);
+  assert.match(
+    ball.stdout,
+    /^BALL has_ball=true idle=false reasons=\[\{"kind":/,
+  );
+  assert.doesNotMatch(ball.stdout, /reasons=reasons=/);
 
   const loop = await runNodeScript(
     join(scriptRoot, "self-driven-loop.mjs"),
