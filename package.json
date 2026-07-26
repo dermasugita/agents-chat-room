@@ -6,6 +6,12 @@
   "bin": {
     "ao": "bin/ao.js"
   },
+  "files": [
+    "bin/",
+    "src/",
+    "templates/",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22.14.0"
   },

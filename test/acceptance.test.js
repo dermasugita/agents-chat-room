@@ -27,7 +27,7 @@ afterEach(() => {
 });
 
 function post(work, overrides = {}) {
-  return store.postMessage(work, {
+  return store.postMessage("sample", work, {
     idempotency_key: crypto.randomUUID(),
     from: "designer",
     role: "designer",
@@ -112,7 +112,11 @@ test("concurrent message posts allocate a gapless unique sequence", async () => 
     const count = 60;
     const responses = await Promise.all(
       Array.from({ length: count }, (_, index) =>
-        request(base, "POST", "/api/v1/works/work-one/messages", {
+        request(
+          base,
+          "POST",
+          "/api/v1/projects/sample/works/work-one/messages",
+          {
           idempotency_key: crypto.randomUUID(),
           from: `impl-${index}`,
           role: "implementer",
@@ -120,11 +124,12 @@ test("concurrent message posts allocate a gapless unique sequence", async () => 
           body: `message ${index}`,
           to: [],
           refs: [],
-        }),
+          },
+        ),
       ),
     );
     assert.ok(responses.every(({ status }) => status === 201));
-    const messages = store.listMessages("work-one");
+    const messages = store.listMessages("sample", "work-one");
     assert.deepEqual(
       messages.map(({ seq }) => seq),
       Array.from({ length: count }, (_, index) => index + 1),
@@ -144,12 +149,65 @@ test("idempotency returns the original message and creates one row", async () =>
       refs: [],
     };
     const responses = await Promise.all([
-      request(base, "POST", "/api/v1/works/work-one/messages", payload),
-      request(base, "POST", "/api/v1/works/work-one/messages", payload),
+      request(
+        base,
+        "POST",
+        "/api/v1/projects/sample/works/work-one/messages",
+        payload,
+      ),
+      request(
+        base,
+        "POST",
+        "/api/v1/projects/sample/works/work-one/messages",
+        payload,
+      ),
     ]);
     assert.deepEqual(responses.map(({ body }) => body.seq), [1, 1]);
-    assert.equal(store.listMessages("work-one").length, 1);
+    assert.equal(store.listMessages("sample", "work-one").length, 1);
   });
+});
+
+test("the same work slug is isolated by project", async () => {
+  store.createProject({ slug: "other", name: "Other" });
+  store.createWork("other", { slug: "work-one", title: "Other work one" });
+
+  await withServer(async (base) => {
+    const payload = (body) => ({
+      idempotency_key: crypto.randomUUID(),
+      from: "designer",
+      role: "designer",
+      type: "message",
+      body,
+      to: [],
+      refs: [],
+    });
+    const sample = await request(
+      base,
+      "POST",
+      "/api/v1/projects/sample/works/work-one/messages",
+      payload("sample message"),
+    );
+    const other = await request(
+      base,
+      "POST",
+      "/api/v1/projects/other/works/work-one/messages",
+      payload("other message"),
+    );
+
+    assert.equal(sample.status, 201);
+    assert.equal(other.status, 201);
+    assert.equal(sample.body.seq, 1);
+    assert.equal(other.body.seq, 1);
+  });
+
+  assert.deepEqual(
+    store.listMessages("sample", "work-one").map(({ body }) => body),
+    ["sample message"],
+  );
+  assert.deepEqual(
+    store.listMessages("other", "work-one").map(({ body }) => body),
+    ["other message"],
+  );
 });
 
 test("question ball is independent per recipient and explicit close clears it", () => {
@@ -174,7 +232,7 @@ test("question ball is independent per recipient and explicit close clears it", 
     "unanswered_question",
   );
 
-  store.closeQuestion("work-one", question.seq, "designer");
+  store.closeQuestion("sample", "work-one", question.seq, "designer");
   assert.equal(store.ballFor(1, "impl-a").has_ball, false);
   assert.equal(store.ballFor(1, "impl-b").has_ball, false);
 });
@@ -203,7 +261,7 @@ test("a participant with the ball and a stale heartbeat is abandoned", () => {
     role: "implementer",
     body: "I am present",
   });
-  store.poll("work-one", "implementer", "implementer", 0);
+  store.poll("sample", "work-one", "implementer", "implementer", 0);
   post("work-one", {
     type: "question",
     body: "Owner needs this answered",
@@ -211,7 +269,7 @@ test("a participant with the ball and a stale heartbeat is abandoned", () => {
   });
 
   currentTime = new Date(currentTime.getTime() + 3 * 60_000 + 1);
-  const result = store.poll("work-one", "designer", "designer", 0);
+  const result = store.poll("sample", "work-one", "designer", "designer", 0);
   assert.equal(result.abandoned.length, 1);
   assert.equal(result.abandoned[0].identifier, "implementer");
   assert.equal(
@@ -226,16 +284,17 @@ test("resolve does not suppress abandonment or idle nudges", () => {
     role: "implementer",
     body: "heartbeat seed",
   });
-  store.poll("work-one", "implementer", "implementer", 0);
+  store.poll("sample", "work-one", "implementer", "implementer", 0);
   post("work-one", {
     type: "question",
     body: "Still pending after resolve",
     to: ["implementer"],
   });
-  store.resolveWork("work-one");
+  store.resolveWork("sample", "work-one");
   currentTime = new Date(currentTime.getTime() + 3 * 60_000 + 1);
   assert.equal(
-    store.poll("work-one", "designer", "designer", 0).abandoned[0].identifier,
+    store.poll("sample", "work-one", "designer", "designer", 0).abandoned[0]
+      .identifier,
     "implementer",
   );
 
@@ -246,9 +305,15 @@ test("resolve does not suppress abandonment or idle nudges", () => {
     body: "finished",
     ball: [],
   });
-  store.resolveWork("idle-work");
+  store.resolveWork("sample", "idle-work");
   currentTime = new Date(currentTime.getTime() + 5 * 60_000 + 1);
-  const idle = store.poll("idle-work", "idle-impl", "implementer", 0);
+  const idle = store.poll(
+    "sample",
+    "idle-work",
+    "idle-impl",
+    "implementer",
+    0,
+  );
   assert.match(idle.idle_nudge, /5 minutes/);
 
   post("idle-work", {
@@ -258,7 +323,8 @@ test("resolve does not suppress abandonment or idle nudges", () => {
     ball: [],
   });
   assert.equal(
-    store.poll("idle-work", "idle-impl", "implementer", 0).idle_nudge,
+    store.poll("sample", "idle-work", "idle-impl", "implementer", 0)
+      .idle_nudge,
     null,
   );
 });
@@ -280,8 +346,88 @@ test("stale expected revisions are advisory and appear on poll", () => {
     base_revision: 1,
     author: "designer",
   });
-  const result = store.poll("work-one", "implementer", "implementer", 0);
+  const result = store.poll(
+    "sample",
+    "work-one",
+    "implementer",
+    "implementer",
+    0,
+  );
   assert.deepEqual(result.stale_expectations, [
     { doc: "context", you_have: 1, current: 2 },
   ]);
+});
+
+test("import preserves every line, original duplicate IDs, and unresolved replies", () => {
+  const result = store.importBundle({
+    project: { slug: "legacy", name: "Legacy" },
+    documents: [
+      {
+        adr_number: 7,
+        author: "import",
+        body: "# ADR 7",
+        kind: "adr",
+        slug: "0007-original-number",
+        title: "Original number",
+      },
+    ],
+    sessions: [
+      {
+        work_slug: "legacy-work",
+        title: "Legacy work",
+        messages: [
+          {
+            id: "msg-0001",
+            ts: "2026-07-26T09:00:00+09:00",
+            from: "designer",
+            to: ["implementer"],
+            type: "question",
+            body: "question",
+          },
+          {
+            id: "msg-0002",
+            ts: "2026-07-26T09:00:01+09:00",
+            from: "implementer",
+            to: ["designer"],
+            type: "answer",
+            body: "unique reply",
+            reply_to: "msg-0001",
+          },
+          {
+            id: "msg-0002",
+            ts: "2026-07-26T09:00:02+09:00",
+            from: "custom-agent",
+            to: [],
+            type: "future-type",
+            body: "duplicate source id",
+          },
+          {
+            id: "msg-0004",
+            ts: "2026-07-26T09:00:03+09:00",
+            from: "designer",
+            to: [],
+            type: "message",
+            body: "ambiguous reply",
+            reply_to: "msg-0002",
+          },
+        ],
+      },
+    ],
+    works: [],
+  });
+
+  assert.equal(result.messages, 4);
+  assert.deepEqual(result.uncertain_roles, ["custom-agent"]);
+  assert.equal(result.mapped_types[0].original, "future-type");
+  assert.equal(result.unresolved_replies[0].reply_to, "msg-0002");
+  const messages = store.listMessages("legacy", "legacy-work");
+  assert.deepEqual(messages.map(({ seq }) => seq), [1, 2, 3, 4]);
+  assert.equal(messages[1].reply_to, 1);
+  assert.equal(messages[3].reply_to, null);
+  assert.ok(messages[1].refs.includes("imported-id:msg-0002"));
+  assert.ok(messages[2].refs.includes("imported-id:msg-0002"));
+  assert.ok(messages[3].refs.includes("unresolved-reply-to:msg-0002"));
+  assert.equal(messages[0].created_at, "2026-07-26T00:00:00.000Z");
+  const adr = store.listDocuments("legacy")[0];
+  assert.equal(adr.slug, "0007-original-number");
 });

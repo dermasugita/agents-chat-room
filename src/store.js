@@ -71,15 +71,21 @@ export function createStore(database, options = {}) {
     return project;
   }
 
-  function workBySlug(slug) {
+  function workBySlug(projectSlug, slug) {
+    const project = projectBySlug(projectSlug);
     const work = database
       .prepare(
         `SELECT work.*, project.slug AS project_slug, project.name AS project_name
          FROM work JOIN project ON project.id = work.project_id
-         WHERE work.slug = ?`,
+         WHERE work.project_id = ? AND work.slug = ?`,
       )
-      .get(slug);
-    assert(work, 404, "work_not_found", `Work not found: ${slug}`);
+      .get(project.id, slug);
+    assert(
+      work,
+      404,
+      "work_not_found",
+      `Work not found: ${projectSlug}/${slug}`,
+    );
     return work;
   }
 
@@ -407,8 +413,8 @@ export function createStore(database, options = {}) {
     return database.prepare("SELECT * FROM work WHERE id = ?").get(result.lastInsertRowid);
   }
 
-  function resolveWork(workSlug) {
-    const work = workBySlug(workSlug);
+  function resolveWork(projectSlug, workSlug) {
+    const work = workBySlug(projectSlug, workSlug);
     database.prepare("UPDATE work SET state = 'resolved' WHERE id = ?").run(work.id);
     return { ...work, state: "resolved" };
   }
@@ -629,8 +635,8 @@ export function createStore(database, options = {}) {
     });
   }
 
-  function postMessage(workSlug, input) {
-    const work = workBySlug(workSlug);
+  function postMessage(projectSlug, workSlug, input) {
+    const work = workBySlug(projectSlug, workSlug);
     assert(
       typeof input?.idempotency_key === "string" && input.idempotency_key,
       400,
@@ -781,8 +787,8 @@ export function createStore(database, options = {}) {
     return getMessageById(messageId);
   }
 
-  function listMessages(workSlug, since = 0) {
-    const work = workBySlug(workSlug);
+  function listMessages(projectSlug, workSlug, since = 0) {
+    const work = workBySlug(projectSlug, workSlug);
     assert(
       Number.isInteger(since) && since >= 0,
       400,
@@ -795,8 +801,8 @@ export function createStore(database, options = {}) {
       .map(hydrateMessage);
   }
 
-  function closeQuestion(workSlug, seq, from) {
-    const work = workBySlug(workSlug);
+  function closeQuestion(projectSlug, workSlug, seq, from) {
+    const work = workBySlug(projectSlug, workSlug);
     assert(typeof from === "string" && from, 400, "invalid_request", "from is required");
     const question = database
       .prepare("SELECT * FROM message WHERE work_id = ? AND seq = ?")
@@ -821,8 +827,14 @@ export function createStore(database, options = {}) {
     return { seq, closed_at: closedAt };
   }
 
-  function poll(workSlug, identifier, role = "implementer", since = 0) {
-    const work = workBySlug(workSlug);
+  function poll(
+    projectSlug,
+    workSlug,
+    identifier,
+    role = "implementer",
+    since = 0,
+  ) {
+    const work = workBySlug(projectSlug, workSlug);
     assert(typeof identifier === "string" && identifier, 400, "invalid_request", "as is required");
     assert(ROLES.has(role), 400, "invalid_request", "role is invalid");
     assert(
@@ -861,7 +873,7 @@ export function createStore(database, options = {}) {
       }));
 
     return {
-      messages: listMessages(workSlug, since),
+      messages: listMessages(projectSlug, workSlug, since),
       your_ball: yourBall,
       idle_nudge: idle
         ? "No participant has acted for 5 minutes and you do not hold the ball. Re-check the work state or ask who should act next."
@@ -902,8 +914,8 @@ export function createStore(database, options = {}) {
     }));
   }
 
-  function getWork(workSlug) {
-    const work = workBySlug(workSlug);
+  function getWork(projectSlug, workSlug) {
+    const work = workBySlug(projectSlug, workSlug);
     return {
       slug: work.slug,
       title: work.title,
@@ -911,13 +923,414 @@ export function createStore(database, options = {}) {
       created_at: work.created_at,
       project: work.project_slug,
       participants: participantStates(work.id),
-      messages: listMessages(workSlug),
+      messages: listMessages(projectSlug, workSlug),
     };
   }
 
-  function seedImportedMessage(workSlug, input) {
+  function seedImportedMessage(projectSlug, workSlug, input) {
     const idempotencyKey = input.idempotency_key ?? `import:${randomUUID()}`;
-    return postMessage(workSlug, { ...input, idempotency_key: idempotencyKey });
+    return postMessage(projectSlug, workSlug, {
+      ...input,
+      idempotency_key: idempotencyKey,
+    });
+  }
+
+  function inferImportedRole(identifier) {
+    const normalized = identifier.toLowerCase();
+    if (normalized.includes("owner")) {
+      return { role: "owner", uncertain: false };
+    }
+    if (normalized.includes("designer") || normalized.includes("design")) {
+      return { role: "designer", uncertain: false };
+    }
+    if (
+      normalized.includes("implementer") ||
+      normalized.includes("impl")
+    ) {
+      return { role: "implementer", uncertain: false };
+    }
+    return { role: "implementer", uncertain: true };
+  }
+
+  function importBundle(input) {
+    assert(input?.project, 400, "invalid_request", "project is required");
+    const requestedSlug = requireSlug(input.project.slug, "project slug");
+    assert(
+      typeof input.project.name === "string" && input.project.name.trim(),
+      400,
+      "invalid_request",
+      "project name is required",
+    );
+    const documents = input.documents ?? [];
+    const works = input.works ?? [];
+    const sessions = input.sessions ?? [];
+    assert(Array.isArray(documents), 400, "invalid_request", "documents must be an array");
+    assert(Array.isArray(works), 400, "invalid_request", "works must be an array");
+    assert(Array.isArray(sessions), 400, "invalid_request", "sessions must be an array");
+
+    return inTransaction(database, () => {
+      const importedAt = now();
+      let project = database
+        .prepare("SELECT * FROM project WHERE slug = ?")
+        .get(requestedSlug);
+      let projectSlug = requestedSlug;
+      if (project && !input.reuse_project) {
+        let suffix = 2;
+        while (
+          database
+            .prepare("SELECT 1 FROM project WHERE slug = ?")
+            .get(`${requestedSlug}-import-${suffix}`)
+        ) {
+          suffix += 1;
+        }
+        projectSlug = `${requestedSlug}-import-${suffix}`;
+        project = undefined;
+      }
+      if (!project) {
+        const result = database
+          .prepare("INSERT INTO project(slug, name, created_at) VALUES (?, ?, ?)")
+          .run(projectSlug, input.project.name.trim(), importedAt);
+        project = database
+          .prepare("SELECT * FROM project WHERE id = ?")
+          .get(result.lastInsertRowid);
+      }
+
+      const workDefinitions = new Map();
+      for (const work of works) {
+        const slug = requireSlug(work.slug, "work slug");
+        workDefinitions.set(slug, {
+          slug,
+          state: work.state === "resolved" ? "resolved" : "open",
+          title:
+            typeof work.title === "string" && work.title.trim()
+              ? work.title.trim()
+              : slug,
+        });
+      }
+      for (const session of sessions) {
+        const slug = requireSlug(session.work_slug, "session work slug");
+        if (!workDefinitions.has(slug)) {
+          workDefinitions.set(slug, {
+            slug,
+            state: "open",
+            title:
+              typeof session.title === "string" && session.title.trim()
+                ? session.title.trim()
+                : slug,
+          });
+        }
+      }
+      for (const document of documents.filter(({ kind }) => kind === "handoff")) {
+        const slug = requireSlug(
+          document.work_slug ?? document.slug,
+          "handoff work slug",
+        );
+        if (!workDefinitions.has(slug)) {
+          workDefinitions.set(slug, {
+            slug,
+            state: "open",
+            title: document.title || slug,
+          });
+        }
+      }
+
+      const workRows = new Map();
+      for (const definition of workDefinitions.values()) {
+        let row = database
+          .prepare("SELECT * FROM work WHERE project_id = ? AND slug = ?")
+          .get(project.id, definition.slug);
+        if (!row) {
+          const result = database
+            .prepare(
+              `INSERT INTO work(project_id, slug, title, state, created_at)
+               VALUES (?, ?, ?, ?, ?)`,
+            )
+            .run(
+              project.id,
+              definition.slug,
+              definition.title,
+              definition.state,
+              importedAt,
+            );
+          row = database
+            .prepare("SELECT * FROM work WHERE id = ?")
+            .get(result.lastInsertRowid);
+        }
+        workRows.set(definition.slug, row);
+      }
+
+      const report = {
+        project: project.slug,
+        documents: 0,
+        works: workRows.size,
+        messages: 0,
+        uncertain_roles: [],
+        mapped_types: [],
+        skipped_documents: [],
+        unresolved_replies: [],
+      };
+
+      for (const imported of documents) {
+        assert(
+          DOCUMENT_KINDS.has(imported.kind),
+          400,
+          "invalid_request",
+          `Invalid imported document kind: ${imported.kind}`,
+        );
+        assert(
+          typeof imported.title === "string" && imported.title.trim(),
+          400,
+          "invalid_request",
+          "Imported documents require a title",
+        );
+        assert(
+          typeof imported.body === "string",
+          400,
+          "invalid_request",
+          "Imported documents require a body",
+        );
+        let slug;
+        let adrNumber = null;
+        let workId = null;
+        if (imported.kind === "context") {
+          slug = "context";
+        } else if (imported.kind === "adr") {
+          slug = requireSlug(imported.slug, "ADR slug");
+          adrNumber = Number(imported.adr_number);
+          assert(
+            Number.isInteger(adrNumber) && adrNumber > 0,
+            400,
+            "invalid_request",
+            "Imported ADRs require their original positive adr_number",
+          );
+        } else {
+          slug = requireSlug(imported.slug, "handoff slug");
+          workId = workRows.get(imported.work_slug ?? slug)?.id;
+          assert(workId, 400, "invalid_request", `Missing work for handoff: ${slug}`);
+        }
+        const existing = database
+          .prepare(
+            "SELECT 1 FROM document WHERE project_id = ? AND kind = ? AND slug = ?",
+          )
+          .get(project.id, imported.kind, slug);
+        if (existing) {
+          report.skipped_documents.push(
+            documentIdentifier({ kind: imported.kind, slug }),
+          );
+          continue;
+        }
+        if (
+          imported.kind === "context" &&
+          database
+            .prepare("SELECT 1 FROM document WHERE project_id = ? AND kind = 'context'")
+            .get(project.id)
+        ) {
+          report.skipped_documents.push("context");
+          continue;
+        }
+        assert(
+          imported.kind !== "adr" ||
+            !database
+              .prepare(
+                "SELECT 1 FROM document WHERE project_id = ? AND adr_number = ?",
+              )
+              .get(project.id, adrNumber),
+          409,
+          "adr_number_conflict",
+          `ADR number already exists: ${adrNumber}`,
+        );
+        const createdAt = imported.created_at
+          ? normalizeTime(imported.created_at)
+          : importedAt;
+        const result = database
+          .prepare(
+            `INSERT INTO document(
+               project_id, kind, slug, work_id, adr_number, title, current_revision, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)`,
+          )
+          .run(
+            project.id,
+            imported.kind,
+            slug,
+            workId,
+            adrNumber,
+            imported.title.trim(),
+            createdAt,
+          );
+        database
+          .prepare(
+            `INSERT INTO revision(
+               document_id, revision, body, author, note, created_at
+             ) VALUES (?, 1, ?, ?, ?, ?)`,
+          )
+          .run(
+            result.lastInsertRowid,
+            imported.body,
+            imported.author || "import",
+            imported.note ?? "Imported from file-based workflow",
+            createdAt,
+          );
+        report.documents += 1;
+      }
+
+      for (const session of sessions) {
+        const work = workRows.get(session.work_slug);
+        assert(work, 400, "invalid_request", `Missing work: ${session.work_slug}`);
+        assert(
+          Array.isArray(session.messages),
+          400,
+          "invalid_request",
+          "Session messages must be an array",
+        );
+        const startingSeq = database
+          .prepare(
+            "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM message WHERE work_id = ?",
+          )
+          .get(work.id).next;
+        const sourceIds = new Map();
+        session.messages.forEach((message, index) => {
+          const sourceId =
+            typeof message.id === "string" && message.id
+              ? message.id
+              : `line-${index + 1}`;
+          const indexes = sourceIds.get(sourceId) ?? [];
+          indexes.push(index);
+          sourceIds.set(sourceId, indexes);
+        });
+
+        for (let index = 0; index < session.messages.length; index += 1) {
+          const source = session.messages[index];
+          const sourceId =
+            typeof source.id === "string" && source.id
+              ? source.id
+              : `line-${index + 1}`;
+          const from =
+            typeof source.from === "string" && source.from
+              ? source.from
+              : "unknown-importer";
+          const inferred = inferImportedRole(from);
+          if (inferred.uncertain && !report.uncertain_roles.includes(from)) {
+            report.uncertain_roles.push(from);
+          }
+          const sourceType = source.type;
+          const type = MESSAGE_TYPES.has(sourceType) ? sourceType : "message";
+          if (type !== sourceType) {
+            report.mapped_types.push({
+              line: index + 1,
+              original: sourceType ?? null,
+              work: session.work_slug,
+            });
+          }
+          let replyToSeq = null;
+          let unresolvedReply = null;
+          if (source.reply_to !== undefined && source.reply_to !== null) {
+            const targets = sourceIds.get(String(source.reply_to)) ?? [];
+            if (targets.length === 1) {
+              replyToSeq = startingSeq + targets[0];
+            } else {
+              unresolvedReply = String(source.reply_to);
+              report.unresolved_replies.push({
+                line: index + 1,
+                reply_to: unresolvedReply,
+                work: session.work_slug,
+              });
+            }
+          }
+          const createdAt = source.ts ? normalizeTime(source.ts) : importedAt;
+          const seq = startingSeq + index;
+          const result = database
+            .prepare(
+              `INSERT INTO message(
+                 work_id, seq, idempotency_key, from_identifier, type, body,
+                 reply_to_seq, closed_at, has_ball_declaration, created_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            )
+            .run(
+              work.id,
+              seq,
+              `import:${randomUUID()}`,
+              from,
+              type,
+              typeof source.body === "string" ? source.body : String(source.body ?? ""),
+              replyToSeq,
+              source.closed_at ? normalizeTime(source.closed_at) : null,
+              Object.hasOwn(source, "ball") ? 1 : 0,
+              createdAt,
+            );
+          const messageId = result.lastInsertRowid;
+          database
+            .prepare(
+              `INSERT INTO participant(
+                 work_id, identifier, role, first_seen_at, last_heartbeat_at
+               ) VALUES (?, ?, ?, ?, NULL)
+               ON CONFLICT(work_id, identifier) DO NOTHING`,
+            )
+            .run(work.id, from, inferred.role, createdAt);
+          for (const identifier of [
+            ...new Set(Array.isArray(source.to) ? source.to.filter((item) => typeof item === "string" && item) : []),
+          ]) {
+            database
+              .prepare("INSERT INTO message_to(message_id, identifier) VALUES (?, ?)")
+              .run(messageId, identifier);
+          }
+          const refs = Array.isArray(source.refs)
+            ? source.refs.filter((item) => typeof item === "string" && item)
+            : [];
+          for (const ref of refs) {
+            database
+              .prepare("INSERT INTO message_ref(message_id, ref) VALUES (?, ?)")
+              .run(messageId, ref);
+          }
+          database
+            .prepare("INSERT INTO message_ref(message_id, ref) VALUES (?, ?)")
+            .run(messageId, `imported-id:${sourceId}`);
+          if (unresolvedReply) {
+            database
+              .prepare("INSERT INTO message_ref(message_id, ref) VALUES (?, ?)")
+              .run(messageId, `unresolved-reply-to:${unresolvedReply}`);
+          }
+          if (Array.isArray(source.ball)) {
+            for (const identifier of [
+              ...new Set(
+                source.ball.filter((item) => typeof item === "string" && item),
+              ),
+            ]) {
+              database
+                .prepare(
+                  "INSERT INTO ball_declaration(message_id, identifier) VALUES (?, ?)",
+                )
+                .run(messageId, identifier);
+            }
+          }
+          if (Array.isArray(source.expects)) {
+            for (const expectation of source.expects) {
+              if (
+                !expectation ||
+                typeof expectation.doc !== "string" ||
+                !Number.isInteger(expectation.revision)
+              ) {
+                continue;
+              }
+              let importedDocument;
+              try {
+                importedDocument = documentRow(project.id, expectation.doc);
+              } catch {
+                continue;
+              }
+              database
+                .prepare(
+                  `INSERT OR IGNORE INTO message_expects(
+                     message_id, document_id, revision
+                   ) VALUES (?, ?, ?)`,
+                )
+                .run(messageId, importedDocument.id, expectation.revision);
+            }
+          }
+          report.messages += 1;
+        }
+      }
+      return report;
+    });
   }
 
   return {
@@ -931,6 +1344,7 @@ export function createStore(database, options = {}) {
     getWork,
     health,
     inbox,
+    importBundle,
     listDocuments,
     listMessages,
     listProjects,

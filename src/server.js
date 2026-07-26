@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { createDatabase } from "./db.js";
 import { AppError } from "./errors.js";
 import { createStore } from "./store.js";
+import { routeWeb } from "./web.js";
 
 const DEFAULT_PORT = 7331;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
@@ -88,15 +89,21 @@ async function routeApi(request, response, url, store) {
     return true;
   }
 
-  match = path.match(/^\/api\/v1\/works\/([^/]+)$/);
+  match = path.match(/^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)$/);
   if (match && method === "GET") {
-    json(response, 200, store.getWork(decode(match[1])));
+    json(response, 200, store.getWork(decode(match[1]), decode(match[2])));
     return true;
   }
 
-  match = path.match(/^\/api\/v1\/works\/([^/]+)\/resolve$/);
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)\/resolve$/,
+  );
   if (match && method === "POST") {
-    json(response, 200, store.resolveWork(decode(match[1])));
+    json(
+      response,
+      200,
+      store.resolveWork(decode(match[1]), decode(match[2])),
+    );
     return true;
   }
 
@@ -151,39 +158,60 @@ async function routeApi(request, response, url, store) {
     }
   }
 
-  match = path.match(/^\/api\/v1\/works\/([^/]+)\/messages$/);
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)\/messages$/,
+  );
   if (match) {
-    const work = decode(match[1]);
+    const project = decode(match[1]);
+    const work = decode(match[2]);
     if (method === "GET") {
       json(response, 200, {
-        messages: store.listMessages(work, integerQuery(url, "since")),
+        messages: store.listMessages(
+          project,
+          work,
+          integerQuery(url, "since"),
+        ),
       });
       return true;
     }
     if (method === "POST") {
-      json(response, 201, store.postMessage(work, await readJson(request)));
+      json(
+        response,
+        201,
+        store.postMessage(project, work, await readJson(request)),
+      );
       return true;
     }
   }
 
-  match = path.match(/^\/api\/v1\/works\/([^/]+)\/messages\/(\d+)\/close$/);
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)\/messages\/(\d+)\/close$/,
+  );
   if (match && method === "POST") {
     const body = await readJson(request);
     json(
       response,
       200,
-      store.closeQuestion(decode(match[1]), Number(match[2]), body.from),
+      store.closeQuestion(
+        decode(match[1]),
+        decode(match[2]),
+        Number(match[3]),
+        body.from,
+      ),
     );
     return true;
   }
 
-  match = path.match(/^\/api\/v1\/works\/([^/]+)\/poll$/);
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)\/poll$/,
+  );
   if (match && method === "GET") {
     json(
       response,
       200,
       store.poll(
         decode(match[1]),
+        decode(match[2]),
         url.searchParams.get("as"),
         url.searchParams.get("role") ?? "implementer",
         integerQuery(url, "since"),
@@ -194,6 +222,11 @@ async function routeApi(request, response, url, store) {
 
   if (path === "/api/v1/inbox" && method === "GET") {
     json(response, 200, { questions: store.inbox(url.searchParams.get("as")) });
+    return true;
+  }
+
+  if (path === "/api/v1/import" && method === "POST") {
+    json(response, 201, store.importBundle(await readJson(request)));
     return true;
   }
 
@@ -222,7 +255,9 @@ export function createHttpServer(options = {}) {
   const server = http.createServer(async (request, response) => {
     try {
       const url = new URL(request.url, "http://localhost");
-      const handled = await routeApi(request, response, url, store);
+      const handled =
+        (await routeApi(request, response, url, store)) ||
+        (await routeWeb(request, response, url, store));
       if (!handled) {
         json(response, 404, { error: "not_found", message: "Route not found" });
       }
