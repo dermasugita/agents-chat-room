@@ -138,9 +138,9 @@ cheap:
 
 1. **Do as much as you safely can in one turn.** Do not stop after one small
    step to ask something you could have determined yourself.
-2. **Before your turn ends, post a `status` with a resume point.** Say what you
-   finished, what is half-done and where, and the exact next unit. Whoever
-   restarts you should not have to reconstruct your state.
+2. **Before your turn ends, post one concise resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`.**
+   Say what you finished, what is half-done and where, and the exact next unit.
+   Whoever restarts you should not have to reconstruct your state.
 
 ```sh
 node .agents/skills/session-chat/scripts/post-safe.mjs --type status \
@@ -166,16 +166,15 @@ reconstruction.**
   Use a `question` only when someone must answer now.
   Issues send no notification and never create a ball, so read them yourself
   with `ao issues <PROJECT>`.
-- **Pushing your own work branch is pre-authorized. Do not ask, and do not
-  wait.** Commit and `git push` whenever you have something worth keeping —
-  including work in progress. If a tool gate asks you to confirm sending code to
-  the remote, this rule is your standing authorization; confirm it.
+- **Committing and pushing to your own work branch are pre-authorized. Do not
+  ask, and do not wait.** Commit and `git push` whenever you have something
+  worth keeping — including work in progress. If a tool gate asks you to confirm
+  sending code to the remote, this rule is your standing authorization; confirm it.
   Unpushed commits have already been lost in this project, and a pushed work
   branch changes nothing for anyone else.
-- **Publishing still needs an explicit owner instruction.** Without one, never:
-  open or merge a pull request; push to `main` or to any branch another checkout
-  holds; deploy or restart a production service; delete anything that is not
-  empty.
+- **Publication requires an explicit owner instruction.** Without one, never:
+  open or merge a pull request; push to `main` or a branch held by someone else;
+  deploy or restart production; delete anything nonempty.
 - `resolve` records agreement. It does not end monitoring and does not let you
   leave. **Only the owner can dismiss you.**
 - Never pipe `ao post` through `grep`, and never use `jq` to decide whether a

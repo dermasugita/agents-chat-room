@@ -885,6 +885,8 @@ test("document deletion requires confirmation, removes revisions, and releases a
         participants: 0,
         documents: 1,
         revisions: 2,
+        issues: 0,
+        issue_comments: 0,
         message_recipients: 0,
         message_refs: 0,
         message_expectations: 1,
@@ -1529,6 +1531,44 @@ test("on-demand participants await activation across projects and can return to 
         identifier: "second-on-demand",
       },
     ],
+  );
+
+  const issueIdentity = {
+    origin_project: "sample",
+    origin_identifier: "on-demand-impl",
+    origin_role: "implementer",
+    origin_work: "work-one",
+  };
+  const issue = store.createIssue("second-project", {
+    title: "Attendance-independent issue",
+    body: "Issue operations must not refresh a participant heartbeat.",
+    ...issueIdentity,
+  });
+  store.addIssueComment("second-project", issue.number, {
+    body: "Still awaiting activation",
+    ...issueIdentity,
+  });
+  store.closeIssue("second-project", issue.number, {
+    reason: "Measured",
+    ...issueIdentity,
+  });
+  store.reopenIssue("second-project", issue.number);
+  const afterIssueOperations = store
+    .getWork("sample", "work-one")
+    .participants.find(({ identifier }) => identifier === "on-demand-impl");
+  assert.equal(afterIssueOperations.last_heartbeat_at, onDemand.last_heartbeat_at);
+  assert.equal(afterIssueOperations.awaiting_activation, true);
+  assert.deepEqual(
+    store.activationInbox().map(({ project, work, identifier }) => ({
+      project,
+      work,
+      identifier,
+    })),
+    activationInbox.map(({ project, work, identifier }) => ({
+      project,
+      work,
+      identifier,
+    })),
   );
 
   await withServer(async (base) => {

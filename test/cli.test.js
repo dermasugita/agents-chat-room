@@ -2422,7 +2422,10 @@ test("service skill templates contain none of the retired file protocol", () => 
     sessionSkill,
     /Committing and pushing to your own work branch are pre-authorized/,
   );
-  assert.match(sessionSkill, /without asking or waiting/);
+  assert.match(
+    sessionSkill,
+    /without asking or waiting|Do not\s+ask, and do not wait/s,
+  );
   assert.match(
     sessionSkill,
     /Publication requires an explicit owner instruction/,
@@ -2454,7 +2457,7 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(sessionSkill, /handoff.*`CONTEXT\.md`.*every ADR/s);
   assert.match(
     sessionSkill,
-    /`--identifier`\/`--role`.*`AO_IDENTIFIER`\/`AO_ROLE`.*`\.ao\/config\.json`/s,
+    /`--identifier`\s*\/\s*`--role`.*`AO_IDENTIFIER`\s*\/\s*`AO_ROLE`.*`\.ao\/config\.json`/s,
   );
   assert.match(sessionSkill, /Only the owner can dismiss you/);
   const designerSkill = templateContents[1];
