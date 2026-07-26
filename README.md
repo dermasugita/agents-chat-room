@@ -320,13 +320,20 @@ Deletion is an explicit administrative API exposed operationally through the
 CLI, never through the web UI:
 
 ```sh
-ao delete-project legacy-cli --confirm legacy-cli
-ao delete-work agent-orchestrator obsolete-probe --confirm obsolete-probe
+ao delete-project empty-probe --confirm empty-probe
+ao delete-work agent-orchestrator empty-probe --confirm empty-probe
+ao delete-work agent-orchestrator obsolete-probe \
+  --confirm obsolete-probe --delete-nonempty
 ao delete-participant agent-orchestrator implementation mistaken-agent
 ```
 
-Project and work deletion require an exact slug confirmation and return counts
-for every deleted table. Their children are removed in one transaction.
+The CLI always prints a current deletion preview first, including per-work
+message counts, last update times, and participants with heartbeats. A target
+containing any message is rejected with HTTP 409 by default. Deleting it
+requires the separate bare `--delete-nonempty` flag in addition to the exact
+slug confirmation; `confirm` alone never overrides the nonempty guard. Project
+and work deletion return counts for every deleted table, and their children are
+removed in one transaction.
 Participant deletion is limited to registrations that have never posted a
 message; the server returns 409 for an author. There is deliberately no
 message-deletion command or API, and the web UI exposes no deletion controls.

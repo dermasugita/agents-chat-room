@@ -852,6 +852,22 @@ test("delete CLI commands stay on the repository server and report protected cle
   assert.equal(wrongConfirmation.code, 1);
   assert.equal(store.getWork("delete-cli", "old-work").messages.length, 1);
 
+  const falseOverride = await runCli(
+    [
+      "delete-work",
+      "delete-cli",
+      "old-work",
+      "--confirm",
+      "old-work",
+      "--delete-nonempty=false",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(falseOverride.code, 1);
+  assert.match(falseOverride.stderr, /does not take a value/);
+  assert.equal(store.getWork("delete-cli", "old-work").messages.length, 1);
+
   const work = await runCli(
     [
       "delete-work",
@@ -859,11 +875,15 @@ test("delete CLI commands stay on the repository server and report protected cle
       "old-work",
       "--confirm",
       "old-work",
+      "--delete-nonempty",
     ],
     repository,
     environment,
   );
   assert.equal(work.code, 0, work.stderr);
+  assert.match(work.stderr, /Deletion preview for delete-cli\/old-work/);
+  assert.match(work.stderr, /messages=1/);
+  assert.match(work.stderr, /heartbeat_participants=speaker@/);
   assert.deepEqual(JSON.parse(work.stdout).deleted, {
     projects: 0,
     works: 1,
@@ -883,6 +903,9 @@ test("delete CLI commands stay on the repository server and report protected cle
     environment,
   );
   assert.equal(project.code, 0, project.stderr);
+  assert.match(project.stderr, /Deletion preview for delete-cli/);
+  assert.match(project.stderr, /works=0 messages=0/);
+  assert.match(project.stderr, /works: none/);
   assert.equal(JSON.parse(project.stdout).deleted.projects, 1);
   assert.equal(
     store.listProjects().some(({ slug }) => slug === "delete-cli"),

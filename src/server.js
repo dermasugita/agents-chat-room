@@ -111,10 +111,22 @@ async function routeApi(request, response, url, store) {
       json(
         response,
         200,
-        store.deleteProject(project, url.searchParams.get("confirm")),
+        store.deleteProject(
+          project,
+          url.searchParams.get("confirm"),
+          booleanQuery(url, "delete_nonempty", false),
+        ),
       );
       return true;
     }
+  }
+
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/deletion-preview$/,
+  );
+  if (match && method === "GET") {
+    json(response, 200, store.previewProjectDeletion(decode(match[1])));
+    return true;
   }
 
   match = path.match(/^\/api\/v1\/projects\/([^/]+)\/works$/);
@@ -139,10 +151,23 @@ async function routeApi(request, response, url, store) {
           project,
           work,
           url.searchParams.get("confirm"),
+          booleanQuery(url, "delete_nonempty", false),
         ),
       );
       return true;
     }
+  }
+
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)\/deletion-preview$/,
+  );
+  if (match && method === "GET") {
+    json(
+      response,
+      200,
+      store.previewWorkDeletion(decode(match[1]), decode(match[2])),
+    );
+    return true;
   }
 
   match = path.match(

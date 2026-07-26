@@ -220,8 +220,30 @@ test("project deletion requires confirmation and reports every cascaded row", as
     to: [],
     refs: [],
   });
+  store.poll("delete-project", "alpha", "designer", "designer");
 
   await withServer(async (base) => {
+    const preview = await request(
+      base,
+      "GET",
+      "/api/v1/projects/delete-project/deletion-preview",
+    );
+    assert.equal(preview.status, 200);
+    assert.deepEqual(preview.body.totals, {
+      projects: 1,
+      works: 2,
+      messages: 2,
+      participants: 2,
+      documents: 3,
+      revisions: 3,
+    });
+    assert.deepEqual(preview.body.works[0].heartbeat_participants, [
+      {
+        identifier: "designer",
+        last_heartbeat_at: "2026-07-26T00:00:00.000Z",
+      },
+    ]);
+
     const missing = await request(
       base,
       "DELETE",
@@ -244,8 +266,37 @@ test("project deletion requires confirmation and reports every cascaded row", as
       "DELETE",
       "/api/v1/projects/delete-project?confirm=delete-project",
     );
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.body, {
+    assert.equal(result.status, 409);
+    assert.equal(result.body.error, "nonempty_delete_requires_override");
+    assert.equal(result.body.required_override, "delete_nonempty=true");
+    assert.deepEqual(result.body.deletion_preview, preview.body);
+    assert.deepEqual(
+      preview.body.works.map(({ slug, message_count, last_updated_at }) => ({
+        slug,
+        message_count,
+        last_updated_at,
+      })),
+      [
+        {
+          slug: "alpha",
+          message_count: 1,
+          last_updated_at: "2026-07-26T00:00:00.000Z",
+        },
+        {
+          slug: "beta",
+          message_count: 1,
+          last_updated_at: "2026-07-26T00:00:00.000Z",
+        },
+      ],
+    );
+
+    const deleted = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/delete-project?confirm=delete-project&delete_nonempty=true",
+    );
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(deleted.body, {
       target: { project: "delete-project" },
       deleted: {
         projects: 1,
@@ -306,7 +357,7 @@ test("project deletion rolls every child deletion back after a later failure", (
   `);
 
   assert.throws(
-    () => store.deleteProject("rollback-delete", "rollback-delete"),
+    () => store.deleteProject("rollback-delete", "rollback-delete", true),
     /forced delete failure/,
   );
   assert.equal(store.getProject("rollback-delete").works.length, 1);
@@ -376,8 +427,17 @@ test("work deletion removes its thread and documents but preserves the project",
       "DELETE",
       "/api/v1/projects/sample/works/delete-work?confirm=delete-work",
     );
-    assert.equal(result.status, 200);
-    assert.deepEqual(result.body, {
+    assert.equal(result.status, 409);
+    assert.equal(result.body.deletion_preview.works[0].message_count, 1);
+    assert.equal(result.body.deletion_preview.works[0].slug, "delete-work");
+
+    const deleted = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/sample/works/delete-work?confirm=delete-work&delete_nonempty=true",
+    );
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(deleted.body, {
       target: { project: "sample", work: "delete-work" },
       deleted: {
         projects: 0,

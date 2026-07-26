@@ -45,8 +45,8 @@ Usage:
   ao resolve [--identifier ID] [--role ROLE]
   ao create-work <SLUG> --title TITLE [--implementer ID]
   ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
-  ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]
-  ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]
+  ao delete-project <PROJECT> --confirm PROJECT [--delete-nonempty] [--repo PATH]
+  ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]
   ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]
   ao import <repo> [--yes] [--project SLUG] [--name NAME]
 
@@ -76,8 +76,8 @@ const COMMAND_OPTIONS = new Map([
       "name",
     ],
   ],
-  ["delete-project", ["confirm", "repo"]],
-  ["delete-work", ["confirm", "repo"]],
+  ["delete-project", ["confirm", "delete-nonempty", "repo"]],
+  ["delete-work", ["confirm", "delete-nonempty", "repo"]],
   ["delete-participant", ["repo"]],
   ["pull", [...CONTEXT_OPTIONS, "force"]],
   ["push", [...CONTEXT_OPTIONS, "note"]],
@@ -180,6 +180,14 @@ function option(parsed, name, fallback = undefined) {
 
 function hasOption(parsed, name) {
   return parsed.options.has(name);
+}
+
+function booleanFlag(parsed, name) {
+  const values = parsed.options.get(name) ?? [];
+  if (values.some((value) => value !== true)) {
+    throw new CliError(`--${name} does not take a value`);
+  }
+  return values.length > 0;
 }
 
 function optionList(parsed, name) {
@@ -588,13 +596,24 @@ async function deleteProjectCommand(parsed) {
   const project = requiredArgument(
     parsed,
     1,
-    "ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]",
+    "ao delete-project <PROJECT> --confirm PROJECT [--delete-nonempty] [--repo PATH]",
   );
+  const deleteNonempty = booleanFlag(parsed, "delete-nonempty");
+  const resolvedServer = resolveServerUrl(parsed);
+  const preview = await api(
+    resolvedServer,
+    "GET",
+    `/projects/${encodeURIComponent(project)}/deletion-preview`,
+  );
+  printDeletionPreview(preview);
   const query = new URLSearchParams({
     confirm: requireOption(parsed, "confirm"),
   });
+  if (deleteNonempty) {
+    query.set("delete_nonempty", "true");
+  }
   return api(
-    resolveServerUrl(parsed),
+    resolvedServer,
     "DELETE",
     `/projects/${encodeURIComponent(project)}?${query}`,
   );
@@ -604,21 +623,61 @@ async function deleteWorkCommand(parsed) {
   const project = requiredArgument(
     parsed,
     1,
-    "ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]",
+    "ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]",
   );
   const work = requiredArgument(
     parsed,
     2,
-    "ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]",
+    "ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]",
   );
+  const deleteNonempty = booleanFlag(parsed, "delete-nonempty");
+  const resolvedServer = resolveServerUrl(parsed);
+  const preview = await api(
+    resolvedServer,
+    "GET",
+    `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}/deletion-preview`,
+  );
+  printDeletionPreview(preview);
   const query = new URLSearchParams({
     confirm: requireOption(parsed, "confirm"),
   });
+  if (deleteNonempty) {
+    query.set("delete_nonempty", "true");
+  }
   return api(
-    resolveServerUrl(parsed),
+    resolvedServer,
     "DELETE",
     `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}?${query}`,
   );
+}
+
+function printDeletionPreview(preview) {
+  const target = preview.target.work
+    ? `${preview.target.project}/${preview.target.work}`
+    : preview.target.project;
+  const totals = preview.totals;
+  console.error(`Deletion preview for ${target}:`);
+  console.error(
+    `  projects=${totals.projects} works=${totals.works} messages=${totals.messages} participants=${totals.participants} documents=${totals.documents} revisions=${totals.revisions}`,
+  );
+  if (preview.works.length === 0) {
+    console.error("  works: none");
+    return;
+  }
+  for (const work of preview.works) {
+    const participants =
+      work.heartbeat_participants.length === 0
+        ? "none"
+        : work.heartbeat_participants
+            .map(
+              ({ identifier, last_heartbeat_at: heartbeat }) =>
+                `${identifier}@${heartbeat}`,
+            )
+            .join(",");
+    console.error(
+      `  work=${work.slug} messages=${work.message_count} last_updated_at=${work.last_updated_at} heartbeat_participants=${participants}`,
+    );
+  }
 }
 
 async function deleteParticipantCommand(parsed) {

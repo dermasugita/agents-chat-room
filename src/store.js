@@ -513,10 +513,117 @@ export function createStore(database, options = {}) {
     );
   }
 
-  function deleteProject(projectSlug, confirmation) {
+  function workDeletionSummary(work) {
+    const messageActivity = database
+      .prepare(
+        `SELECT COUNT(*) AS message_count, MAX(created_at) AS last_message_at
+         FROM message WHERE work_id = ?`,
+      )
+      .get(work.id);
+    const heartbeatParticipants = database
+      .prepare(
+        `SELECT identifier, last_heartbeat_at
+         FROM participant
+         WHERE work_id = ? AND last_heartbeat_at IS NOT NULL
+         ORDER BY identifier`,
+      )
+      .all(work.id);
+    const documentCounts = database
+      .prepare(
+        `SELECT COUNT(DISTINCT document.id) AS document_count,
+                COUNT(revision.id) AS revision_count
+         FROM document
+         LEFT JOIN revision ON revision.document_id = document.id
+         WHERE document.work_id = ?`,
+      )
+      .get(work.id);
+    const participantCount = Number(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM participant WHERE work_id = ?")
+        .get(work.id).count,
+    );
+    return {
+      slug: work.slug,
+      title: work.title,
+      message_count: Number(messageActivity.message_count),
+      last_updated_at: messageActivity.last_message_at ?? work.created_at,
+      heartbeat_participants: heartbeatParticipants,
+      participant_count: participantCount,
+      document_count: Number(documentCounts.document_count),
+      revision_count: Number(documentCounts.revision_count),
+    };
+  }
+
+  function previewProjectDeletion(projectSlug) {
+    const project = projectBySlug(projectSlug);
+    const works = database
+      .prepare("SELECT * FROM work WHERE project_id = ? ORDER BY slug")
+      .all(project.id)
+      .map(workDeletionSummary);
+    const projectDocumentCounts = database
+      .prepare(
+        `SELECT COUNT(DISTINCT document.id) AS document_count,
+                COUNT(revision.id) AS revision_count
+         FROM document
+         LEFT JOIN revision ON revision.document_id = document.id
+         WHERE document.project_id = ?`,
+      )
+      .get(project.id);
+    return {
+      target: { project: projectSlug },
+      totals: {
+        projects: 1,
+        works: works.length,
+        messages: works.reduce((total, work) => total + work.message_count, 0),
+        participants: works.reduce(
+          (total, work) => total + work.participant_count,
+          0,
+        ),
+        documents: Number(projectDocumentCounts.document_count),
+        revisions: Number(projectDocumentCounts.revision_count),
+      },
+      works,
+    };
+  }
+
+  function previewWorkDeletion(projectSlug, workSlug) {
+    const work = workBySlug(projectSlug, workSlug);
+    const summary = workDeletionSummary(work);
+    return {
+      target: { project: projectSlug, work: workSlug },
+      totals: {
+        projects: 0,
+        works: 1,
+        messages: summary.message_count,
+        participants: summary.participant_count,
+        documents: summary.document_count,
+        revisions: summary.revision_count,
+      },
+      works: [summary],
+    };
+  }
+
+  function requireNonemptyDeletionOverride(preview, deleteNonempty) {
+    assert(
+      preview.totals.messages === 0 || deleteNonempty === true,
+      409,
+      "nonempty_delete_requires_override",
+      "Target contains messages; pass the separate delete_nonempty override to delete it",
+      {
+        required_override: "delete_nonempty=true",
+        deletion_preview: preview,
+      },
+    );
+  }
+
+  function deleteProject(projectSlug, confirmation, deleteNonempty = false) {
     requireDeletionConfirmation(projectSlug, confirmation);
     return inTransaction(database, () => {
       const project = projectBySlug(projectSlug);
+      requireNonemptyDeletionOverride(
+        previewProjectDeletion(projectSlug),
+        deleteNonempty,
+      );
       const deleted = emptyDeletionCounts();
       const messageIds = `
         SELECT message.id
@@ -579,10 +686,19 @@ export function createStore(database, options = {}) {
     });
   }
 
-  function deleteWork(projectSlug, workSlug, confirmation) {
+  function deleteWork(
+    projectSlug,
+    workSlug,
+    confirmation,
+    deleteNonempty = false,
+  ) {
     requireDeletionConfirmation(workSlug, confirmation);
     return inTransaction(database, () => {
       const work = workBySlug(projectSlug, workSlug);
+      requireNonemptyDeletionOverride(
+        previewWorkDeletion(projectSlug, workSlug),
+        deleteNonempty,
+      );
       const deleted = emptyDeletionCounts();
       const messageIds = "SELECT id FROM message WHERE work_id = ?";
       const documentIds = "SELECT id FROM document WHERE work_id = ?";
@@ -1809,6 +1925,8 @@ export function createStore(database, options = {}) {
     participantStates,
     poll,
     postMessage,
+    previewProjectDeletion,
+    previewWorkDeletion,
     resolveWork,
     seedImportedMessage,
     updateDocument,
