@@ -152,6 +152,8 @@ function sidebar(
   currentProject = undefined,
   currentWork = undefined,
   projectPageCurrent = false,
+  issueCurrent = undefined,
+  crossIssuesCurrent = false,
 ) {
   const projects = store.listProjects();
   const tree = projects
@@ -170,6 +172,10 @@ function sidebar(
               href="/projects/${encodeURIComponent(project.slug)}/works/${encodeURIComponent(work.slug)}"${workActive ? ' aria-current="page"' : ""}>${escapeHtml(work.title)}</a></li>`;
           })
           .join("") || '<li class="sidebar-empty">作業はまだありません。</li>';
+      const issueLinkCurrent =
+        projectActive && issueCurrent
+          ? ` aria-current="${issueCurrent}"`
+          : "";
       return `<li class="sidebar-project">
         <div class="sidebar-project-node">
           <button class="sidebar-project-toggle" type="button"
@@ -180,6 +186,8 @@ function sidebar(
           <a class="sidebar-link sidebar-project-link${projectActive ? " is-active" : ""}"
             href="/projects/${encodeURIComponent(project.slug)}"${projectCurrent}>${escapeHtml(project.name)}</a>
         </div>
+        <a class="sidebar-link sidebar-issues${projectActive && issueCurrent ? " is-active" : ""}"
+          href="/projects/${encodeURIComponent(project.slug)}/issues"${issueLinkCurrent}>課題 <span class="meta">open ${project.open_issue_count}</span></a>
         <ul class="sidebar-work-tree" id="${workTreeId}">${works}</ul>
       </li>`;
     })
@@ -187,7 +195,8 @@ function sidebar(
   return `<aside class="sidebar">
     <nav aria-label="作業スレッド">
       <h2>作業スレッド</h2>
-      <a class="sidebar-link sidebar-home${currentProject ? "" : " is-active"}" href="/"${currentProject ? "" : ' aria-current="page"'}>ホーム</a>
+      <a class="sidebar-link sidebar-home${currentProject || crossIssuesCurrent ? "" : " is-active"}" href="/"${currentProject || crossIssuesCurrent ? "" : ' aria-current="page"'}>ホーム</a>
+      <a class="sidebar-link sidebar-cross-issues${crossIssuesCurrent ? " is-active" : ""}" href="/issues"${crossIssuesCurrent ? ' aria-current="page"' : ""}>未対応の課題</a>
       <ul class="sidebar-project-tree">${tree || '<li class="sidebar-empty">プロジェクトはまだありません。</li>'}</ul>
     </nav>
   </aside>`;
@@ -223,6 +232,7 @@ function layout(title, body, navigation) {
     .sidebar-link:hover { background:#eef3fa; color:#183f7e; }
     .sidebar-link.is-active { background:#dce8fa; color:#173f7e; font-weight:700; }
     .sidebar-project-link { flex:1; }
+    .sidebar-issues { margin:.12rem 0 .12rem 1.65rem; font-size:.88rem; }
     .sidebar-work { font-size:.88rem; }
     .sidebar-empty { color:#61708a; font-size:.82rem; padding:.3rem .4rem; }
     .grid { display:grid; gap:1rem; grid-template-columns:repeat(auto-fit,minmax(280px,1fr)); }
@@ -377,7 +387,7 @@ async function readForm(request) {
 function projectCard(project) {
   return `<article class="card">
     <h2><a href="/projects/${encodeURIComponent(project.slug)}">${escapeHtml(project.name)}</a></h2>
-    <p class="meta">${escapeHtml(project.slug)} · 文書 ${project.document_count}件 · 作業 ${project.work_count}件</p>
+    <p class="meta">${escapeHtml(project.slug)} · 文書 ${project.document_count}件 · 作業 ${project.work_count}件 · 課題 open ${project.open_issue_count}件</p>
   </article>`;
 }
 
@@ -398,17 +408,174 @@ function inboxCard(question) {
   </article>`;
 }
 
+function ballReasonLabel(reason) {
+  if (reason.kind === "unanswered_question") {
+    return `未回答の question #${reason.seq}（${reason.from} より）`;
+  }
+  if (reason.kind === "declared") {
+    return `宣言されたボール #${reason.seq}（${reason.by} より）`;
+  }
+  return "理由不明";
+}
+
+function activationCard(participant) {
+  return `<article class="card">
+    <div><span class="badge ball">起動待ち</span>
+      <strong>${escapeHtml(participant.identifier)}</strong>
+      <span class="badge">${escapeHtml(participant.role)}</span></div>
+    <p class="meta"><a href="/projects/${encodeURIComponent(participant.project)}">${escapeHtml(participant.project)}</a>
+      / <a href="/projects/${encodeURIComponent(participant.project)}/works/${encodeURIComponent(participant.work)}">${escapeHtml(participant.work)}</a></p>
+    <p class="meta">最終心拍: ${escapeHtml(participant.last_heartbeat_at ? `${formatJst(participant.last_heartbeat_at)}（${formatElapsed(participant.last_heartbeat_at)}）` : "未接続")}</p>
+    <p class="meta">ボール: ${participant.ball_reasons.map((reason) => escapeHtml(ballReasonLabel(reason))).join(" / ")}</p>
+  </article>`;
+}
+
 function home(store) {
   const projects = store.listProjects();
   const questions = store.inbox("owner");
+  const awaitingActivation = store.activationInbox();
   return layout(
     "プロジェクト",
     `<h1>プロジェクト</h1>
      <div class="grid">${projects.map(projectCard).join("") || '<p class="card">プロジェクトはまだありません。</p>'}</div>
      <h1>オーナー受信箱</h1>
      <p class="meta">全プロジェクトの <code>owner</code> 宛未回答 <code>question</code>。</p>
-     <div class="grid">${questions.map(inboxCard).join("") || '<p class="card">未回答の question はありません。</p>'}</div>`,
+     <div class="grid">${questions.map(inboxCard).join("") || '<p class="card">未回答の question はありません。</p>'}</div>
+     <h1>いま起こすべき参加者</h1>
+     <p class="meta">全プロジェクトの <code>awaiting_activation</code>。起動待ちでボールを持つ参加者です。</p>
+     <div class="grid">${awaitingActivation.map(activationCard).join("") || '<p class="card">起動待ちの参加者はいません。</p>'}</div>`,
     sidebar(store),
+  );
+}
+
+function issuePath(project, number) {
+  return `/projects/${encodeURIComponent(project)}/issues/${number}`;
+}
+
+function issueOrigin(issue) {
+  const work = issue.origin_work
+    ? ` · 作業 ${escapeHtml(issue.origin_work)}`
+    : "";
+  return `${escapeHtml(issue.origin_project)}/${escapeHtml(issue.origin_identifier)} (${escapeHtml(issue.origin_role)})${work}`;
+}
+
+function issueRows(issues, { showProject = false } = {}) {
+  const columnCount = showProject ? 5 : 4;
+  return (
+    issues
+      .map(
+        (issue) => `<tr>
+          ${showProject ? `<td><a href="/projects/${encodeURIComponent(issue.project)}/issues">${escapeHtml(issue.project_name)}</a></td>` : ""}
+          <td><a href="${issuePath(issue.project, issue.number)}">#${issue.number} ${escapeHtml(issue.title)}</a></td>
+          <td><span class="badge">${escapeHtml(issue.state)}</span></td>
+          <td>${issueOrigin(issue)}</td>
+          <td class="meta">${escapeHtml(formatJst(issue.created_at))}</td>
+        </tr>`,
+      )
+      .join("") ||
+    `<tr><td colspan="${columnCount}">該当する課題はありません。</td></tr>`
+  );
+}
+
+function crossProjectIssuesPage(store) {
+  const groups = store.listIssuesAcrossProjects("open");
+  const issues = groups.flatMap(({ issues: projectIssues }) => projectIssues);
+  return layout(
+    "未対応の課題",
+    `<h1>未対応の課題</h1>
+     <p class="meta">全プロジェクトの <code>open</code> 課題。課題は通知やボールを作らないため、ここで確認します。</p>
+     <section class="card"><table>
+       <thead><tr><th>プロジェクト</th><th>課題</th><th>状態</th><th>出身</th><th>作成日時</th></tr></thead>
+       <tbody>${issueRows(issues, { showProject: true })}</tbody>
+     </table></section>`,
+    sidebar(store, undefined, undefined, false, undefined, true),
+  );
+}
+
+function issueStateNavigation(projectSlug, selectedState) {
+  return `<nav aria-label="課題の状態">
+    ${[
+      ["open", "未対応"],
+      ["closed", "クローズ済み"],
+      ["all", "すべて"],
+    ]
+      .map(
+        ([state, label]) =>
+          `<a class="badge${selectedState === state ? " is-active" : ""}" href="/projects/${encodeURIComponent(projectSlug)}/issues?state=${state}"${selectedState === state ? ' aria-current="page"' : ""}>${label} (${state})</a>`,
+      )
+      .join(" ")}
+  </nav>`;
+}
+
+function projectIssuesPage(store, projectSlug, state) {
+  const project = store.getProject(projectSlug);
+  const issues = store.listIssues(projectSlug, state);
+  return layout(
+    `${project.name}の課題`,
+    `<p><a href="/projects/${encodeURIComponent(projectSlug)}">← プロジェクト</a></p>
+     <h1>${escapeHtml(project.name)}の課題</h1>
+     ${issueStateNavigation(projectSlug, state)}
+     <section class="card"><table>
+       <thead><tr><th>課題</th><th>状態</th><th>出身</th><th>作成日時</th></tr></thead>
+       <tbody>${issueRows(issues)}</tbody>
+     </table></section>
+     <section class="card"><h2>オーナーとして起票</h2>
+       <form method="post" action="/projects/${encodeURIComponent(projectSlug)}/issues">
+         <label>題名<input name="title" required></label>
+         <label>本文<textarea name="body" required data-submit-shortcut></textarea></label>
+         <button type="submit">起票</button>
+       </form>
+     </section>`,
+    sidebar(store, projectSlug, undefined, false, "page"),
+  );
+}
+
+function issueCommentCard(comment) {
+  return `<article class="card">
+    <div><span class="badge">コメント #${comment.seq}</span>
+      <strong>${escapeHtml(comment.origin_project)}/${escapeHtml(comment.origin_identifier)}</strong>
+      <span class="meta">(${escapeHtml(comment.origin_role)}) · ${escapeHtml(formatJst(comment.created_at))}</span></div>
+    <div class="markdown">${renderMarkdown(comment.body, { hardBreaks: true })}</div>
+  </article>`;
+}
+
+function issueDetailPage(store, projectSlug, number) {
+  const issue = store.getIssue(projectSlug, number);
+  const stateAction =
+    issue.state === "open"
+      ? `<form method="post" action="${issuePath(projectSlug, number)}/close">
+           <label>クローズ理由<input name="reason" required></label>
+           <button type="submit">クローズ</button>
+         </form>`
+      : `<form method="post" action="${issuePath(projectSlug, number)}/reopen">
+           <button type="submit">再オープン</button>
+         </form>`;
+  const closeDetails =
+    issue.state === "closed"
+      ? `<p><strong>クローズ理由:</strong> ${escapeHtml(issue.close_reason)}<br>
+           <span class="meta">${escapeHtml(issue.closed_by)} · ${escapeHtml(formatJst(issue.closed_at))}</span></p>`
+      : "";
+  return layout(
+    `#${issue.number} ${issue.title}`,
+    `<p><a href="/projects/${encodeURIComponent(projectSlug)}/issues">← 課題一覧</a></p>
+     <article class="card">
+       <h1>#${issue.number} ${escapeHtml(issue.title)}</h1>
+       <p><span class="badge">${escapeHtml(issue.state)}</span></p>
+       <p class="meta">出身: ${issueOrigin(issue)} · ${escapeHtml(formatJst(issue.created_at))}</p>
+       <div class="markdown">${renderMarkdown(issue.body, { hardBreaks: true })}</div>
+       ${closeDetails}
+       ${stateAction}
+     </article>
+     <section><h2>コメント</h2>
+       ${issue.comments.map(issueCommentCard).join("") || '<p class="card">コメントはまだありません。</p>'}
+     </section>
+     <section class="card"><h2>オーナーとしてコメント</h2>
+       <form method="post" action="${issuePath(projectSlug, number)}/comments">
+         <label>本文<textarea name="body" required data-submit-shortcut></textarea></label>
+         <button type="submit">コメント</button>
+       </form>
+     </section>`,
+    sidebar(store, projectSlug, undefined, false, "location"),
   );
 }
 
@@ -467,9 +634,15 @@ function participantRow(participant) {
   const badges = [
     participant.expected ? '<span class="badge">担当枠</span>' : "",
     participant.waiting ? '<span class="badge">参加待ち</span>' : "",
+    participant.attendance_mode === "on-demand"
+      ? '<span class="badge">起動待ち型</span>'
+      : '<span class="badge">自走型</span>',
     participant.ball.has_ball ? '<span class="badge ball">ボールあり</span>' : "",
     !participant.ball.has_ball ? '<span class="badge">ボールなし</span>' : "",
     participant.abandoned ? '<span class="badge danger">離脱</span>' : "",
+    participant.awaiting_activation
+      ? '<span class="badge ball">起動待ち</span>'
+      : "",
   ].join("");
   return `<tr><td>${escapeHtml(participant.identifier)}</td><td>${escapeHtml(participant.role)}</td>
     <td>${badges}</td>
@@ -490,9 +663,11 @@ function participantsForDisplay(work) {
         ...expected,
         expected: true,
         waiting: true,
+        attendance_mode: "self-driven",
         last_heartbeat_at: null,
         ball: { has_ball: false, reasons: [] },
         abandoned: false,
+        awaiting_activation: false,
       };
   return [
     expectedRow,
@@ -554,9 +729,102 @@ export async function routeWeb(request, response, url, store) {
     return true;
   }
 
+  if (request.method === "GET" && url.pathname === "/issues") {
+    html(response, 200, crossProjectIssuesPage(store));
+    return true;
+  }
+
   let match = url.pathname.match(/^\/projects\/([^/]+)$/);
   if (request.method === "GET" && match) {
     html(response, 200, projectPage(store, decodeURIComponent(match[1])));
+    return true;
+  }
+
+  match = url.pathname.match(/^\/projects\/([^/]+)\/issues$/);
+  if (match) {
+    const projectSlug = decodeURIComponent(match[1]);
+    if (request.method === "GET") {
+      html(
+        response,
+        200,
+        projectIssuesPage(
+          store,
+          projectSlug,
+          url.searchParams.get("state") ?? "open",
+        ),
+      );
+      return true;
+    }
+    if (request.method === "POST") {
+      const form = await readForm(request);
+      const issue = store.createIssue(projectSlug, {
+        title: form.get("title") ?? "",
+        body: form.get("body") ?? "",
+        origin_project: projectSlug,
+        origin_identifier: "owner",
+        origin_role: "owner",
+      });
+      redirect(response, issuePath(projectSlug, issue.number));
+      return true;
+    }
+  }
+
+  match = url.pathname.match(/^\/projects\/([^/]+)\/issues\/(\d+)$/);
+  if (request.method === "GET" && match) {
+    html(
+      response,
+      200,
+      issueDetailPage(
+        store,
+        decodeURIComponent(match[1]),
+        Number(match[2]),
+      ),
+    );
+    return true;
+  }
+
+  match = url.pathname.match(
+    /^\/projects\/([^/]+)\/issues\/(\d+)\/comments$/,
+  );
+  if (request.method === "POST" && match) {
+    const projectSlug = decodeURIComponent(match[1]);
+    const number = Number(match[2]);
+    const form = await readForm(request);
+    store.addIssueComment(projectSlug, number, {
+      body: form.get("body") ?? "",
+      origin_project: projectSlug,
+      origin_identifier: "owner",
+      origin_role: "owner",
+    });
+    redirect(response, issuePath(projectSlug, number));
+    return true;
+  }
+
+  match = url.pathname.match(
+    /^\/projects\/([^/]+)\/issues\/(\d+)\/close$/,
+  );
+  if (request.method === "POST" && match) {
+    const projectSlug = decodeURIComponent(match[1]);
+    const number = Number(match[2]);
+    const form = await readForm(request);
+    store.closeIssue(projectSlug, number, {
+      reason: form.get("reason") ?? "",
+      origin_project: projectSlug,
+      origin_identifier: "owner",
+      origin_role: "owner",
+    });
+    redirect(response, issuePath(projectSlug, number));
+    return true;
+  }
+
+  match = url.pathname.match(
+    /^\/projects\/([^/]+)\/issues\/(\d+)\/reopen$/,
+  );
+  if (request.method === "POST" && match) {
+    const projectSlug = decodeURIComponent(match[1]);
+    const number = Number(match[2]);
+    store.reopenIssue(projectSlug, number);
+    redirect(response, issuePath(projectSlug, number));
     return true;
   }
 

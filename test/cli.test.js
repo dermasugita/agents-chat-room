@@ -61,6 +61,8 @@ async function runCli(args, cwd, env = {}) {
       cwd,
       env: {
         ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
         AO_SERVER_URL: "",
         HOME: isolatedHome,
         ...env,
@@ -81,7 +83,13 @@ async function runPersistentCli(args, cwd, timeout = 250) {
   try {
     await execFileAsync(process.execPath, [cliPath, ...args], {
       cwd,
-      env: { ...process.env, AO_SERVER_URL: "", HOME: isolatedHome },
+      env: {
+        ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
+        AO_SERVER_URL: "",
+        HOME: isolatedHome,
+      },
       maxBuffer: 5 * 1024 * 1024,
       timeout,
     });
@@ -97,6 +105,8 @@ async function runNodeScript(script, args, cwd, env = {}) {
       cwd,
       env: {
         ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
         AO_SERVER_URL: "",
         HOME: isolatedHome,
         ...env,
@@ -120,6 +130,8 @@ async function runTimedNodeScript(script, args, cwd, env = {}, timeout = 250) {
       cwd,
       env: {
         ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
         AO_SERVER_URL: "",
         HOME: isolatedHome,
         ...env,
@@ -195,6 +207,8 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     ".ao/docs/CONTEXT.md",
     ".claude/skills/session-chat/SKILL.md",
     ".agents/skills/session-chat/SKILL.md",
+    ".claude/skills/design-handoff/SKILL.md",
+    ".agents/skills/design-handoff/SKILL.md",
     ".claude/skills/session-chat/scripts/post-safe.mjs",
     ".agents/skills/session-chat/scripts/post-safe.mjs",
     ".claude/skills/session-chat/scripts/watch-passive.mjs",
@@ -214,15 +228,35 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
   ]) {
     assert.equal(existsSync(join(repository, path)), true, path);
   }
-  assert.equal(
-    readFileSync(
-      join(repository, ".claude/skills/session-chat/SKILL.md"),
+  for (const skillName of ["session-chat", "design-handoff"]) {
+    const template = readFileSync(
+      resolve(`templates/skills/${skillName}/SKILL.md`),
       "utf8",
-    ),
+    );
+    const claude = readFileSync(
+      join(repository, `.claude/skills/${skillName}/SKILL.md`),
+      "utf8",
+    );
+    const agents = readFileSync(
+      join(repository, `.agents/skills/${skillName}/SKILL.md`),
+      "utf8",
+    );
+    assert.equal(claude, template, `${skillName} Claude copy`);
+    assert.equal(agents, template, `${skillName} Codex copy`);
+  }
+  assert.match(
     readFileSync(
       join(repository, ".agents/skills/session-chat/SKILL.md"),
       "utf8",
     ),
+    /outside the current scope[\s\S]*ao issue-create[\s\S]*question[\s\S]*no notification/,
+  );
+  assert.match(
+    readFileSync(
+      join(repository, ".agents/skills/design-handoff/SKILL.md"),
+      "utf8",
+    ),
+    /ao issues <PROJECT>[\s\S]*Issues do not notify you or[\s\S]*startup and during every periodic/,
   );
   for (const script of [
     "post-safe.mjs",
@@ -343,6 +377,134 @@ test("inject creates or reuses --work and the repository is immediately usable",
   );
 });
 
+test("issue CLI derives origin from config and supports the full lifecycle", async () => {
+  store.createProject({ slug: "issue-cli-target", name: "Issue CLI target" });
+  const repository = makeRepository("issue-cli");
+  await injectRepository(repository, "issue-origin");
+  const heartbeatBefore = heartbeatFor("issue-origin");
+  await waitForClockTick();
+
+  const created = await runCli(
+    [
+      "issue-create",
+      "issue-cli-target",
+      "--title",
+      "Cross-project issue",
+      "--body",
+      "Created from the sample project",
+    ],
+    repository,
+  );
+  assert.equal(created.code, 0, created.stderr);
+  assert.deepEqual(
+    (({
+      project,
+      number,
+      state,
+      origin_project,
+      origin_identifier,
+      origin_role,
+      origin_work,
+    }) => ({
+      project,
+      number,
+      state,
+      origin_project,
+      origin_identifier,
+      origin_role,
+      origin_work,
+    }))(JSON.parse(created.stdout)),
+    {
+      project: "issue-cli-target",
+      number: 1,
+      state: "open",
+      origin_project: "sample",
+      origin_identifier: "issue-origin",
+      origin_role: "implementer",
+      origin_work: "work-one",
+    },
+  );
+
+  const forgedOrigin = await runCli(
+    [
+      "issue-create",
+      "issue-cli-target",
+      "--title",
+      "Rejected",
+      "--body",
+      "Rejected",
+      "--origin-project",
+      "forged",
+    ],
+    repository,
+  );
+  assert.notEqual(forgedOrigin.code, 0);
+  assert.match(forgedOrigin.stderr, /Unknown option --origin-project/);
+
+  const comment = await runCli(
+    [
+      "issue-comment",
+      "issue-cli-target",
+      "1",
+      "--body",
+      "Implementation note",
+    ],
+    repository,
+  );
+  assert.equal(comment.code, 0, comment.stderr);
+  assert.equal(JSON.parse(comment.stdout).origin_identifier, "issue-origin");
+
+  const detail = await runCli(
+    ["issue", "issue-cli-target", "1"],
+    repository,
+  );
+  assert.equal(detail.code, 0, detail.stderr);
+  assert.deepEqual(
+    JSON.parse(detail.stdout).comments.map(({ seq, body }) => ({ seq, body })),
+    [{ seq: 1, body: "Implementation note" }],
+  );
+
+  const closed = await runCli(
+    [
+      "issue-close",
+      "issue-cli-target",
+      "1",
+      "--reason",
+      "Verified",
+    ],
+    repository,
+  );
+  assert.equal(closed.code, 0, closed.stderr);
+  assert.equal(JSON.parse(closed.stdout).closed_by, "sample/issue-origin");
+
+  const openList = await runCli(
+    ["issues", "issue-cli-target"],
+    repository,
+  );
+  assert.equal(openList.code, 0, openList.stderr);
+  assert.deepEqual(JSON.parse(openList.stdout).issues, []);
+
+  const crossProject = await runCli(
+    ["issues", "--state", "closed"],
+    repository,
+  );
+  assert.equal(crossProject.code, 0, crossProject.stderr);
+  assert.equal(
+    JSON.parse(crossProject.stdout).projects.find(
+      ({ project }) => project.slug === "issue-cli-target",
+    ).issues[0].number,
+    1,
+  );
+
+  const reopened = await runCli(
+    ["issue-reopen", "issue-cli-target", "1"],
+    repository,
+  );
+  assert.equal(reopened.code, 0, reopened.stderr);
+  assert.equal(JSON.parse(reopened.stdout).state, "open");
+  assert.equal(heartbeatFor("issue-origin"), heartbeatBefore);
+});
+
 test("server resolution is environment, repository config, then user default", () => {
   const repository = makeRepository("server-resolution-repository");
   const unconfiguredRepository = makeRepository(
@@ -394,6 +556,52 @@ test("server resolution is environment, repository config, then user default", (
   );
 });
 
+test("identity resolution is flags, environment, then repository config", () => {
+  const repositoryConfig = {
+    identifier: "repository-agent",
+    role: "implementer",
+  };
+  const fromRepository = cliInternals.resolveIdentity(
+    cliInternals.parseArguments(["watch"]),
+    repositoryConfig,
+    { environment: {} },
+  );
+  assert.equal(fromRepository.identifier, "repository-agent");
+  assert.equal(fromRepository.role, "implementer");
+
+  const fromEnvironment = cliInternals.resolveIdentity(
+    cliInternals.parseArguments(["watch"]),
+    repositoryConfig,
+    {
+      environment: {
+        AO_IDENTIFIER: "environment-agent",
+        AO_ROLE: "designer",
+      },
+    },
+  );
+  assert.equal(fromEnvironment.identifier, "environment-agent");
+  assert.equal(fromEnvironment.role, "designer");
+
+  const fromFlags = cliInternals.resolveIdentity(
+    cliInternals.parseArguments([
+      "watch",
+      "--identifier",
+      "explicit-agent",
+      "--role",
+      "owner",
+    ]),
+    repositoryConfig,
+    {
+      environment: {
+        AO_IDENTIFIER: "environment-agent",
+        AO_ROLE: "designer",
+      },
+    },
+  );
+  assert.equal(fromFlags.identifier, "explicit-agent");
+  assert.equal(fromFlags.role, "owner");
+});
+
 test("configure writes the one-time user server setting", async () => {
   const homeDirectory = makeRepository("configured-user-home");
   const result = await runCli(
@@ -406,6 +614,80 @@ test("configure writes the one-time user server setting", async () => {
     JSON.parse(readFileSync(join(homeDirectory, ".ao/config.json"), "utf8")),
     { server_url: serverUrl },
   );
+});
+
+test("user config identity is warned, ignored, and removed by configure", async () => {
+  const homeDirectory = makeRepository("configured-user-identity-home");
+  mkdirSync(join(homeDirectory, ".ao"), { recursive: true });
+  writeFileSync(
+    join(homeDirectory, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: "http://127.0.0.1:1",
+        identifier: "unsafe-user-default",
+        role: "designer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const result = await runCli(
+    ["configure", "--server", serverUrl],
+    temporaryDirectory,
+    { HOME: homeDirectory },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /ignoring and removing agent identity/);
+  assert.match(result.stderr, /unsafe-user-default/);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(homeDirectory, ".ao/config.json"), "utf8")),
+    { server_url: serverUrl },
+  );
+});
+
+test("every command rejects options it does not apply", async () => {
+  for (const command of [
+    "configure",
+    "projects",
+    "design",
+    "rooms",
+    "join",
+    "inject",
+    "delete-project",
+    "delete-work",
+    "delete-document",
+    "delete-participant",
+    "pull",
+    "push",
+    "post",
+    "messages",
+    "watch",
+    "close",
+    "resolve",
+    "create-work",
+    "set-work-implementer",
+    "create-document",
+    "import",
+  ]) {
+    const result = await runCli(
+      [command, "--definitely-unsupported"],
+      temporaryDirectory,
+    );
+    assert.equal(result.code, 1, `${command}: ${result.stderr}`);
+    assert.match(
+      result.stderr,
+      new RegExp(`Unknown option --definitely-unsupported for ao ${command}`),
+      command,
+    );
+  }
+
+  const configure = await runCli(
+    ["configure", "--server", serverUrl, "--identifier", "silently-ignored"],
+    temporaryDirectory,
+  );
+  assert.equal(configure.code, 1);
+  assert.match(configure.stderr, /Unknown option --identifier for ao configure/);
 });
 
 test("repository config overrides a conflicting user default in real CLI commands", async () => {
@@ -427,6 +709,234 @@ test("repository config overrides a conflicting user default in real CLI command
   assert.match(heartbeatFor("repository-priority-agent"), /^2026-/);
 });
 
+test("two agents share one repository without mixing names or leaving answered questions abandoned", async () => {
+  store.createProject({ slug: "shared-identity", name: "Shared identity" });
+  store.createWork("shared-identity", {
+    slug: "shared-work",
+    title: "Shared work",
+  });
+  const repository = makeRepository("shared-identity-repository");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  const repositoryConfig = {
+    server_url: serverUrl,
+    project: "shared-identity",
+    work: "shared-work",
+    identifier: "repository-default",
+    role: "implementer",
+    cli: {
+      command: process.execPath,
+      args: [cliPath],
+    },
+  };
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(repositoryConfig, null, 2)}\n`,
+    "utf8",
+  );
+
+  const implementerEnvironment = {
+    AO_IDENTIFIER: "shared-implementer",
+    AO_ROLE: "implementer",
+  };
+  const designerEnvironment = {
+    AO_IDENTIFIER: "shared-designer",
+    AO_ROLE: "designer",
+  };
+  const question = await runCli(
+    [
+      "post",
+      "--type",
+      "question",
+      "--to",
+      "shared-designer",
+      "--body",
+      "Does the shared identity stay distinct?",
+    ],
+    repository,
+    implementerEnvironment,
+  );
+  assert.equal(question.code, 0, question.stderr);
+  const questionSeq = JSON.parse(question.stdout).seq;
+
+  const designerJoin = await runCli(
+    ["watch", "--once"],
+    repository,
+    designerEnvironment,
+  );
+  assert.equal(designerJoin.code, 0, designerJoin.stderr);
+  database
+    .prepare(
+      `UPDATE participant
+          SET last_heartbeat_at = ?
+        WHERE identifier = ?
+          AND work_id = (
+            SELECT work.id
+              FROM work
+              JOIN project ON project.id = work.project_id
+             WHERE project.slug = ? AND work.slug = ?
+          )`,
+    )
+    .run(
+      "2020-01-01T00:00:00.000Z",
+      "shared-designer",
+      "shared-identity",
+      "shared-work",
+    );
+
+  const beforeAnswer = await runCli(
+    ["watch", "--once"],
+    repository,
+    implementerEnvironment,
+  );
+  assert.equal(beforeAnswer.code, 0, beforeAnswer.stderr);
+  assert.match(beforeAnswer.stdout, /ABANDONED identifier=shared-designer/);
+
+  const answer = await runCli(
+    [
+      "post",
+      "--type",
+      "answer",
+      "--reply-to",
+      String(questionSeq),
+      "--body",
+      "Yes. The designer answers under the designer identity.",
+    ],
+    repository,
+    designerEnvironment,
+  );
+  assert.equal(answer.code, 0, answer.stderr);
+  const afterAnswer = await runCli(
+    ["watch", "--once"],
+    repository,
+    implementerEnvironment,
+  );
+  assert.equal(afterAnswer.code, 0, afterAnswer.stderr);
+  assert.doesNotMatch(
+    afterAnswer.stdout,
+    /ABANDONED identifier=shared-designer/,
+  );
+
+  const explicit = await runCli(
+    [
+      "post",
+      "--identifier",
+      "explicit-agent",
+      "--role",
+      "implementer",
+      "--type",
+      "status",
+      "--body",
+      "Flags outrank the environment.",
+    ],
+    repository,
+    designerEnvironment,
+  );
+  assert.equal(explicit.code, 0, explicit.stderr);
+
+  const messages = store.listMessages("shared-identity", "shared-work");
+  assert.deepEqual(
+    messages.map(({ from }) => from),
+    ["shared-implementer", "shared-designer", "explicit-agent"],
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(repository, ".ao/config.json"), "utf8")),
+    repositoryConfig,
+  );
+});
+
+test("all active thread and document commands accept explicit identity flags", async () => {
+  store.createProject({ slug: "identity-flags", name: "Identity flags" });
+  store.createWork("identity-flags", {
+    slug: "flag-work",
+    title: "Flag work",
+  });
+  store.createDocument("identity-flags", {
+    kind: "context",
+    title: "Flag context",
+    body: "# Flag context\n",
+    author: "designer",
+  });
+  const repository = makeRepository("identity-flags-repository");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: serverUrl,
+        project: "identity-flags",
+        work: "flag-work",
+        identifier: "wrong-repository-default",
+        role: "designer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const identity = [
+    "--identifier",
+    "flag-agent",
+    "--role",
+    "implementer",
+  ];
+
+  for (const args of [
+    ["messages", ...identity],
+    ["watch", "--once", ...identity],
+    ["pull", ...identity],
+    ["push", "context", ...identity],
+  ]) {
+    const result = await runCli(args, repository);
+    assert.equal(result.code, 0, `${args[0]}: ${result.stderr}`);
+  }
+
+  const status = await runCli(
+    [
+      "post",
+      "--type",
+      "status",
+      "--body",
+      "Every command accepts explicit identity.",
+      ...identity,
+    ],
+    repository,
+  );
+  assert.equal(status.code, 0, status.stderr);
+  const question = await runCli(
+    [
+      "post",
+      "--type",
+      "question",
+      "--to",
+      "reviewer",
+      "--body",
+      "Close this explicit-identity question.",
+      ...identity,
+    ],
+    repository,
+  );
+  assert.equal(question.code, 0, question.stderr);
+  const close = await runCli(
+    ["close", String(JSON.parse(question.stdout).seq), ...identity],
+    repository,
+  );
+  assert.equal(close.code, 0, close.stderr);
+  const resolved = await runCli(["resolve", ...identity], repository);
+  assert.equal(resolved.code, 0, resolved.stderr);
+
+  const work = store.getWork("identity-flags", "flag-work");
+  const participant = work.participants.find(
+    ({ identifier }) => identifier === "flag-agent",
+  );
+  assert.equal(participant.role, "implementer");
+  assert.match(participant.last_heartbeat_at, /^2026-/);
+  assert.ok(
+    store
+      .listMessages("identity-flags", "flag-work")
+      .every(({ from }) => from === "flag-agent"),
+  );
+});
+
 test("delete CLI commands stay on the repository server and report protected cleanup", async () => {
   const repository = makeRepository("delete-cli-repository");
   await injectRepository(repository, "delete-cli-agent");
@@ -439,6 +949,17 @@ test("delete CLI commands stay on the repository server and report protected cle
   );
   store.createProject({ slug: "delete-cli", name: "Delete CLI" });
   store.createWork("delete-cli", { slug: "old-work", title: "Old work" });
+  store.createDocument("delete-cli", {
+    kind: "context",
+    title: "Delete CLI context",
+    body: "revision one",
+    author: "designer",
+  });
+  store.updateDocument("delete-cli", "context", {
+    body: "revision two",
+    base_revision: 1,
+    author: "designer",
+  });
   store.poll(
     "delete-cli",
     "old-work",
@@ -480,6 +1001,39 @@ test("delete CLI commands stay on the repository server and report protected cle
   assert.equal(protectedParticipant.code, 2);
   assert.match(protectedParticipant.stderr, /cannot be deleted after posting/i);
 
+  const wrongDocumentConfirmation = await runCli(
+    [
+      "delete-document",
+      "delete-cli",
+      "context",
+      "--confirm",
+      "another-document",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(wrongDocumentConfirmation.code, 1);
+  assert.equal(store.getDocument("delete-cli", "context").revision, 2);
+
+  const document = await runCli(
+    [
+      "delete-document",
+      "delete-cli",
+      "context",
+      "--confirm",
+      "context",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(document.code, 0, document.stderr);
+  assert.equal(JSON.parse(document.stdout).deleted.documents, 1);
+  assert.equal(JSON.parse(document.stdout).deleted.revisions, 2);
+  assert.throws(
+    () => store.getDocument("delete-cli", "context"),
+    /Document not found/,
+  );
+
   const wrongConfirmation = await runCli(
     [
       "delete-work",
@@ -494,6 +1048,22 @@ test("delete CLI commands stay on the repository server and report protected cle
   assert.equal(wrongConfirmation.code, 1);
   assert.equal(store.getWork("delete-cli", "old-work").messages.length, 1);
 
+  const falseOverride = await runCli(
+    [
+      "delete-work",
+      "delete-cli",
+      "old-work",
+      "--confirm",
+      "old-work",
+      "--delete-nonempty=false",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(falseOverride.code, 1);
+  assert.match(falseOverride.stderr, /does not take a value/);
+  assert.equal(store.getWork("delete-cli", "old-work").messages.length, 1);
+
   const work = await runCli(
     [
       "delete-work",
@@ -501,11 +1071,15 @@ test("delete CLI commands stay on the repository server and report protected cle
       "old-work",
       "--confirm",
       "old-work",
+      "--delete-nonempty",
     ],
     repository,
     environment,
   );
   assert.equal(work.code, 0, work.stderr);
+  assert.match(work.stderr, /Deletion preview for delete-cli\/old-work/);
+  assert.match(work.stderr, /messages=1/);
+  assert.match(work.stderr, /heartbeat_participants=speaker@/);
   assert.deepEqual(JSON.parse(work.stdout).deleted, {
     projects: 0,
     works: 1,
@@ -513,6 +1087,8 @@ test("delete CLI commands stay on the repository server and report protected cle
     participants: 1,
     documents: 0,
     revisions: 0,
+    issues: 0,
+    issue_comments: 0,
     message_recipients: 0,
     message_refs: 0,
     message_expectations: 0,
@@ -525,11 +1101,101 @@ test("delete CLI commands stay on the repository server and report protected cle
     environment,
   );
   assert.equal(project.code, 0, project.stderr);
+  assert.match(project.stderr, /Deletion preview for delete-cli/);
+  assert.match(project.stderr, /works=0 messages=0/);
+  assert.match(project.stderr, /works: none/);
   assert.equal(JSON.parse(project.stdout).deleted.projects, 1);
   assert.equal(
     store.listProjects().some(({ slug }) => slug === "delete-cli"),
     false,
   );
+});
+
+test("create-document preserves an explicit ADR number and rejects collisions", async () => {
+  store.createProject({ slug: "adr-cli", name: "ADR CLI" });
+  const repository = makeRepository("adr-cli-repository");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: serverUrl,
+        project: "adr-cli",
+        identifier: "adr-author",
+        role: "designer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const file = join(repository, "0011-explicit-decision.md");
+  writeFileSync(file, "# ADR 0011: Explicit decision\n", "utf8");
+
+  const explicit = await runCli(
+    [
+      "create-document",
+      "adr",
+      "--title",
+      "Explicit decision",
+      "--file",
+      file,
+      "--adr-number",
+      "11",
+      "--slug",
+      "0011-explicit-decision",
+    ],
+    repository,
+  );
+  assert.equal(explicit.code, 0, explicit.stderr);
+  assert.equal(JSON.parse(explicit.stdout).adr_number, 11);
+  assert.equal(JSON.parse(explicit.stdout).doc, "adr/0011-explicit-decision");
+
+  const collision = await runCli(
+    [
+      "create-document",
+      "adr",
+      "--title",
+      "Conflicting number",
+      "--file",
+      file,
+      "--adr-number",
+      "11",
+    ],
+    repository,
+  );
+  assert.equal(collision.code, 2);
+  assert.match(collision.stderr, /ADR number already exists: 11/);
+
+  const automatic = await runCli(
+    [
+      "create-document",
+      "adr",
+      "--title",
+      "Automatic next number",
+      "--file",
+      file,
+    ],
+    repository,
+  );
+  assert.equal(automatic.code, 0, automatic.stderr);
+  assert.equal(JSON.parse(automatic.stdout).adr_number, 12);
+
+  const wrongKind = await runCli(
+    [
+      "create-document",
+      "context",
+      "--title",
+      "Wrong option",
+      "--file",
+      file,
+      "--adr-number",
+      "13",
+    ],
+    repository,
+  );
+  assert.equal(wrongKind.code, 1);
+  assert.match(wrongKind.stderr, /applies only to create-document adr/);
 });
 
 test("cold room join uses the declared slot, pulls context, and exposes the full thread", async () => {
@@ -541,13 +1207,22 @@ test("cold room join uses the declared slot, pulls context, and exposes the full
       "cold-room",
       "--title",
       "Cold room",
+    ],
+    controller,
+  );
+  assert.equal(created.code, 0, created.stderr);
+  assert.equal(JSON.parse(created.stdout).expected_participant, null);
+  const declared = await runCli(
+    [
+      "set-work-implementer",
+      "cold-room",
       "--implementer",
       "cold-implementer",
     ],
     controller,
   );
-  assert.equal(created.code, 0, created.stderr);
-  assert.deepEqual(JSON.parse(created.stdout).expected_participant, {
+  assert.equal(declared.code, 0, declared.stderr);
+  assert.deepEqual(JSON.parse(declared.stdout).expected_participant, {
     identifier: "cold-implementer",
     role: "implementer",
   });
@@ -621,7 +1296,7 @@ test("cold room join uses the declared slot, pulls context, and exposes the full
 
   const joined = await runNodeScript(
     helper,
-    [String(roomIndex + 1), "--repo", repository],
+    [String(roomIndex + 1), "--repo", "."],
     repository,
     roomHelperEnvironment,
   );
@@ -703,6 +1378,100 @@ test("cold room join uses the declared slot, pulls context, and exposes the full
   assert.equal(noSlot.code, 2);
   assert.match(noSlot.stderr, /has no implementer slot/);
   assert.match(noSlot.stderr, /--identifier ID/);
+});
+
+test("join, inject, and design warn before replacing repository identity", async () => {
+  function writeExistingConfig(repository, identifier, role = "implementer") {
+    mkdirSync(join(repository, ".ao"), { recursive: true });
+    writeFileSync(
+      join(repository, ".ao/config.json"),
+      `${JSON.stringify(
+        {
+          server_url: serverUrl,
+          project: "sample",
+          work: "work-one",
+          identifier,
+          role,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
+
+  const joinRepository = makeRepository("identity-warning-join");
+  writeExistingConfig(joinRepository, "old-join-agent");
+  const joined = await runCli(
+    [
+      "join",
+      "sample/work-one",
+      "--repo",
+      joinRepository,
+      "--identifier",
+      "new-join-agent",
+      "--role",
+      "implementer",
+    ],
+    joinRepository,
+  );
+  assert.equal(joined.code, 0, joined.stderr);
+  assert.match(joined.stderr, /WARNING: ao join will overwrite agent identity/);
+  assert.match(
+    joined.stderr,
+    /identifier "old-join-agent" -> "new-join-agent"/,
+  );
+
+  const injectRepositoryPath = makeRepository("identity-warning-inject");
+  writeExistingConfig(injectRepositoryPath, "old-inject-agent");
+  const injected = await runCli(
+    [
+      "inject",
+      injectRepositoryPath,
+      "--server",
+      serverUrl,
+      "--project",
+      "sample",
+      "--work",
+      "work-one",
+      "--identifier",
+      "new-inject-agent",
+      "--role",
+      "implementer",
+    ],
+    temporaryDirectory,
+  );
+  assert.equal(injected.code, 0, injected.stderr);
+  assert.match(
+    injected.stderr,
+    /WARNING: ao inject will overwrite agent identity/,
+  );
+
+  const designRepository = makeRepository("identity-warning-design");
+  writeExistingConfig(designRepository, "old-design-agent");
+  const designed = await runCli(
+    [
+      "design",
+      "sample",
+      "--repo",
+      designRepository,
+      "--identifier",
+      "new-designer",
+      "--role",
+      "designer",
+      "--force",
+    ],
+    designRepository,
+  );
+  assert.equal(designed.code, 0, designed.stderr);
+  assert.match(
+    designed.stderr,
+    /WARNING: ao design will overwrite agent identity/,
+  );
+  assert.match(
+    designed.stderr,
+    /role "implementer" -> "designer"/,
+  );
 });
 
 test("designer cold start joins every work and creates missing projects for skeleton grilling", async () => {
@@ -998,6 +1767,49 @@ test("watch emits each message as one distinguishable line", async () => {
   assert.match(messageLine, /line one\\nline two/);
 });
 
+test("watch distinguishes awaiting activation from abandonment", async () => {
+  const repository = makeRepository("activation-watcher");
+  await injectRepository(repository, "activation-watcher");
+  store.postMessage("sample", "work-one", {
+    idempotency_key: crypto.randomUUID(),
+    from: "on-demand-agent",
+    role: "implementer",
+    type: "status",
+    body: "schedule=unavailable:no-scheduler first-unit=resume",
+    to: [],
+    refs: [],
+  });
+  store.postMessage("sample", "work-one", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "question",
+    body: "Please resume",
+    to: ["on-demand-agent"],
+    refs: [],
+  });
+  database
+    .prepare(
+      `UPDATE participant SET last_heartbeat_at = ?
+       WHERE identifier = ?`,
+    )
+    .run("2020-01-01T00:00:00.000Z", "on-demand-agent");
+
+  const watched = await runCli(
+    ["watch", "--once", "--since", "9999"],
+    repository,
+  );
+  assert.equal(watched.code, 0, watched.stderr);
+  assert.match(
+    watched.stdout,
+    /AWAITING_ACTIVATION identifier=on-demand-agent/,
+  );
+  assert.doesNotMatch(
+    watched.stdout,
+    /ABANDONED identifier=on-demand-agent/,
+  );
+});
+
 test("active CLI commands refresh heartbeat while persistent watch does not", async () => {
   const repository = makeRepository("heartbeat-cli");
   await injectRepository(repository, "heartbeat-cli");
@@ -1160,6 +1972,51 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
   );
   assert.equal(posted.code, 0, posted.stderr);
   assert.match(posted.stdout, /日本語の投稿ラッパ確認/);
+
+  const optionPost = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    [
+      "--type",
+      "status",
+      "--to",
+      "designer",
+      "--body",
+      "参照・期待・ボールのフラグ確認",
+      "--ref",
+      "context",
+      "--expect",
+      "context=1",
+      "--ball",
+      "built-in-agent",
+    ],
+    repository,
+    noAdditionalCliSetup,
+  );
+  assert.equal(optionPost.code, 0, optionPost.stderr);
+  const optionMessage = store.listMessages("sample", "work-one").at(-1);
+  assert.deepEqual(optionMessage.to, ["designer"]);
+  assert.deepEqual(optionMessage.refs, ["context"]);
+  assert.deepEqual(optionMessage.expects, [{ doc: "context", revision: 1 }]);
+  assert.deepEqual(optionMessage.ball, ["built-in-agent"]);
+  assert.equal(store.ballFor(1, "built-in-agent").has_ball, true);
+
+  const releasedBall = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    [
+      "--type",
+      "status",
+      "--body",
+      "宣言したボールを空のフラグで解除",
+      "--ball",
+      "",
+    ],
+    repository,
+    noAdditionalCliSetup,
+  );
+  assert.equal(releasedBall.code, 0, releasedBall.stderr);
+  const releaseMessage = store.listMessages("sample", "work-one").at(-1);
+  assert.deepEqual(releaseMessage.ball, []);
+  assert.equal(store.ballFor(1, "built-in-agent").has_ball, false);
 
   const since = store.listMessages("sample", "work-one").at(-1).seq;
   store.postMessage("sample", "work-one", {
@@ -1515,7 +2372,7 @@ test("service skill templates contain none of the retired file protocol", () => 
     assert.match(content, /ao watch (?:--project )?--once/, path);
     assert.match(
       content,
-      /every two minutes|at least every\s+two minutes/,
+      /every (?:2|two) minutes|at least every\s+(?:2|two) minutes/,
       path,
     );
     assert.match(content, /persistent `ao watch`/, path);
@@ -1524,30 +2381,106 @@ test("service skill templates contain none of the retired file protocol", () => 
     assert.match(content, /treated as\s+abandoned/, path);
     assert.match(content, /カスタム スケジュール/, path);
     assert.match(content, /Monitor/, path);
-    assert.match(
-      content,
-      /(?:other|another).*unknown runtime|runtime is\s+different/,
-      path,
-    );
-    assert.match(content, /do not invent|instead of inventing/, path);
-    assert.doesNotMatch(content, /keep `ao watch` running/, path);
   }
   const sessionSkill = templateContents[0];
+  assert.equal(
+    [...sessionSkill.matchAll(/^### ([1-7])\./gm)].map((match) =>
+      Number(match[1]),
+    ).join(","),
+    "1,2,3,4,5,6,7",
+  );
+  assert.match(
+    sessionSkill,
+    /### 3\. Create your own git worktree — mandatory/,
+  );
+  assert.match(sessionSkill, /never work in the shared main checkout/i);
+  assert.match(sessionSkill, /Never reuse an existing one/);
+  assert.match(sessionSkill, /git worktree add worktree\/<WORK>/);
+  assert.match(
+    sessionSkill,
+    /If `work\/<WORK>` is already checked out elsewhere/,
+  );
+  assert.match(sessionSkill, /Do not switch the other checkout/);
+  assert.match(sessionSkill, /-b work\/<WORK>-impl origin\/work\/<WORK>/);
+  assert.match(sessionSkill, /path must be `worktree\/<WORK>`/);
+  assert.match(sessionSkill, /not a detached\s+HEAD/);
+  assert.match(
+    sessionSkill,
+    /Never point `cli\.args` at a\s+path inside the repository/,
+  );
+  assert.match(sessionSkill, /### 4\. Join from inside the worktree/);
+  assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
+  assert.match(
+    sessionSkill,
+    /### 6\. Register a periodic self-check — mandatory/,
+  );
+  assert.match(sessionSkill, /Confirm it fired at least once/);
+  assert.match(
+    sessionSkill,
+    /cannot register it.*say so in step 7.*check every 2 minutes/s,
+  );
+  assert.match(sessionSkill, /### 7\. Post the startup report/);
+  assert.match(
+    sessionSkill,
+    /worktree=<path> branch=<branch> identifier=<id> schedule=<registered\|unavailable:<reason>>/,
+  );
+  assert.match(sessionSkill, /post-safe\.mjs --type status/);
+  assert.match(
+    sessionSkill,
+    /schedule=registered.*self-driven.*schedule=unavailable:<reason>.*on-demand.*awaiting_activation/s,
+  );
+  assert.match(
+    sessionSkill,
+    /resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`/,
+  );
+  assert.match(
+    sessionSkill,
+    /Do not declare another participant's ball on an informational `status`/,
+  );
+  assert.match(sessionSkill, /hand a ball back with `--ball ''`/i);
+  assert.match(sessionSkill, /ao post --type status --ball ''/);
+  assert.match(
+    sessionSkill,
+    /Committing and pushing to your own work branch are pre-authorized/,
+  );
+  assert.match(
+    sessionSkill,
+    /without asking or waiting|Do not\s+ask, and do not wait/s,
+  );
+  assert.match(
+    sessionSkill,
+    /Publication requires an explicit owner instruction/,
+  );
+  for (const protectedAction of [
+    "pull request",
+    "main",
+    "branch held by someone else",
+    "restart production",
+    "delete anything nonempty",
+  ]) {
+    assert.match(sessionSkill, new RegExp(protectedAction));
+  }
+  assert.match(
+    sessionSkill,
+    /post-safe\.mjs --type <type> --body <text> \[--to ID\] \[--reply-to SEQ\] \[--ball ID\]/,
+  );
+  assert.match(sessionSkill, /`--ref` adds references/);
+  assert.match(sessionSkill, /`--expect <doc>=<rev>` records/);
   assert.match(sessionSkill, /AO_CLI/);
   assert.match(sessionSkill, /cli\.command/);
-  assert.match(sessionSkill, /takes precedence/);
+  assert.match(sessionSkill, /takes precedence|override the recorded CLI path/);
   assert.match(
     sessionSkill,
     /AO_SERVER_URL.*repository `\.ao\/config\.json`.*~\/\.ao\/config\.json/s,
   );
   assert.match(sessionSkill, /Only `AO_SERVER_URL` overrides a repository/);
   assert.match(sessionSkill, /Which room number should I join\?/);
-  assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
   assert.match(sessionSkill, /handoff.*`CONTEXT\.md`.*every ADR/s);
-  assert.match(sessionSkill, /unanswered question.*before lower-priority work/s);
-  assert.match(sessionSkill, /Begin the self-driven loop.*`ao watch --once`/s);
-  assert.match(sessionSkill, /post a `status` start message/);
-  assert.match(sessionSkill, /Never silently reuse an occupied implementer slot/);
+  assert.match(
+    sessionSkill,
+    /`--identifier`\s*\/\s*`--role`.*`AO_IDENTIFIER`\s*\/\s*`AO_ROLE`.*`\.ao\/config\.json`/s,
+  );
+  assert.match(sessionSkill, /Only the owner can dismiss you/);
   const designerSkill = templateContents[1];
   assert.match(
     designerSkill,
@@ -1561,6 +2494,29 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(designerSkill, /skeleton_grill\.required=true/);
   assert.match(designerSkill, /ao watch --project --once/);
   assert.match(designerSkill, /fans out to every work/);
+  assert.match(
+    designerSkill,
+    /Register a periodic self-check — mandatory/,
+  );
+  assert.match(designerSkill, /Confirm it fired at least once/);
+  assert.match(
+    designerSkill,
+    /schedule=registered.*self-driven.*schedule=unavailable:<reason>.*on-demand.*awaiting_activation/s,
+  );
+  assert.match(
+    designerSkill,
+    /resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`/,
+  );
+  assert.match(
+    designerSkill,
+    /Do not declare another participant's ball on an informational `status`/,
+  );
+  assert.match(designerSkill, /hand the ball\s+back with `--ball ''`/i);
+  assert.match(
+    designerSkill,
+    /identifier=<id> project=<slug> works=<n> schedule=<registered\|unavailable:<reason>> first-unit=<what>/,
+  );
+  assert.match(designerSkill, /Do not use a worktree for designing/);
   assert.match(designerSkill, /Publish before announcing/);
   assert.match(designerSkill, /Classify every open judgment/);
   assert.match(designerSkill, /passing test is not completion\s+evidence/i);
@@ -1573,6 +2529,17 @@ test("service skill templates contain none of the retired file protocol", () => 
   );
   assert.match(designerSkill, /Only the owner can\s+dismiss participants/);
   assert.match(designerSkill, /Never guess owner-specific facts/);
+  assert.match(designerSkill, /`AO_IDENTIFIER=designer AO_ROLE=designer`/);
+  assert.match(designerSkill, /Never put identity\s+in the user-level/);
+  const grillWithDocsSkill = templateContents[2];
+  assert.match(
+    grillWithDocsSkill,
+    /resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`/,
+  );
+  assert.match(
+    grillWithDocsSkill,
+    /Do not declare another participant's ball on an informational `status`/,
+  );
   const designerScript = resolve(
     "templates/skills/design-handoff/scripts/designer-start.mjs",
   );

@@ -32,27 +32,97 @@ const HELP = `agents-chat-room CLI
 Usage:
   ao configure --server URL
   ao projects [--json]
-  ao design <PROJECT> [--repo PATH] [--identifier ID]
+  ao design <PROJECT> [--repo PATH] [--identifier ID] [--role designer]
   ao rooms [--json] [--repo PATH]
-  ao join <NUMBER|PROJECT/WORK> [--repo PATH] [--identifier ID] [--confirm-occupied]
-  ao inject <repo> --server URL --identifier ID --role ROLE [--project SLUG] [--work SLUG] [--work-title TITLE]
-  ao pull [DOC] [--force] [--repo PATH]
-  ao push <DOC> [--note TEXT] [--repo PATH]
-  ao post --type TYPE --body TEXT [--to ID[,ID]] [--reply-to SEQ] [--ball ID[,ID]]
-  ao messages [--since SEQ]
-  ao watch [--project] [--since SEQ] [--interval SECONDS] [--once]
-  ao close <SEQ>
-  ao resolve
+  ao join <NUMBER|PROJECT/WORK> [--repo PATH] [--identifier ID] [--role ROLE] [--confirm-occupied]
+  ao inject <repo> --server URL [--identifier ID] [--role ROLE] [--project SLUG] [--work SLUG] [--work-title TITLE]
+  ao pull [DOC] [--force] [--repo PATH] [--identifier ID] [--role ROLE]
+  ao push <DOC> [--note TEXT] [--repo PATH] [--identifier ID] [--role ROLE]
+  ao post --type TYPE --body TEXT [--to ID[,ID]] [--reply-to SEQ] [--ball ID[,ID]] [--identifier ID] [--role ROLE]
+  ao messages [--since SEQ] [--identifier ID] [--role ROLE]
+  ao watch [--project] [--since SEQ] [--interval SECONDS] [--once] [--identifier ID] [--role ROLE]
+  ao close <SEQ> [--identifier ID] [--role ROLE]
+  ao resolve [--identifier ID] [--role ROLE]
   ao create-work <SLUG> --title TITLE [--implementer ID]
-  ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
-  ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]
-  ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]
+  ao set-work-implementer <WORK> --implementer ID [--repo PATH]
+  ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG] [--adr-number N]
+  ao delete-project <PROJECT> --confirm PROJECT [--delete-nonempty] [--repo PATH]
+  ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]
+  ao delete-document <PROJECT> <DOC> --confirm DOC [--repo PATH]
   ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]
+  ao issue-create <PROJECT> --title TITLE --body TEXT [--repo PATH]
+  ao issues [PROJECT] [--state open|closed|all] [--repo PATH]
+  ao issue <PROJECT> <NUMBER> [--repo PATH]
+  ao issue-comment <PROJECT> <NUMBER> --body TEXT [--repo PATH]
+  ao issue-close <PROJECT> <NUMBER> --reason TEXT [--repo PATH]
+  ao issue-reopen <PROJECT> <NUMBER> [--repo PATH]
   ao import <repo> [--yes] [--project SLUG] [--name NAME]
 
 Server resolution order is AO_SERVER_URL, repository .ao/config.json, then
 ~/.ao/config.json. Run ao configure once to write the user default.
+
+Identity resolution order is --identifier/--role, AO_IDENTIFIER/AO_ROLE, then
+repository .ao/config.json. Identity belongs to an agent, not a repository.
 `;
+
+const CONTEXT_OPTIONS = ["repo", "work", "identifier", "role"];
+const COMMAND_OPTIONS = new Map([
+  ["configure", ["server"]],
+  ["projects", ["json", "repo"]],
+  ["design", ["repo", "identifier", "role", "force"]],
+  ["rooms", ["json", "repo"]],
+  ["join", ["repo", "identifier", "role", "confirm-occupied", "force"]],
+  [
+    "inject",
+    [
+      "server",
+      "identifier",
+      "role",
+      "project",
+      "work",
+      "work-title",
+      "name",
+    ],
+  ],
+  ["delete-project", ["confirm", "delete-nonempty", "repo"]],
+  ["delete-work", ["confirm", "delete-nonempty", "repo"]],
+  ["delete-document", ["confirm", "repo"]],
+  ["delete-participant", ["repo"]],
+  ["pull", [...CONTEXT_OPTIONS, "force"]],
+  ["push", [...CONTEXT_OPTIONS, "note"]],
+  [
+    "post",
+    [
+      ...CONTEXT_OPTIONS,
+      "type",
+      "body",
+      "body-file",
+      "to",
+      "reply-to",
+      "ball",
+      "idempotency-key",
+      "expect",
+      "ref",
+    ],
+  ],
+  ["messages", [...CONTEXT_OPTIONS, "since"]],
+  ["watch", [...CONTEXT_OPTIONS, "project", "since", "interval", "once"]],
+  ["close", CONTEXT_OPTIONS],
+  ["resolve", CONTEXT_OPTIONS],
+  ["create-work", [...CONTEXT_OPTIONS, "title", "implementer"]],
+  ["set-work-implementer", [...CONTEXT_OPTIONS, "implementer"]],
+  [
+    "create-document",
+    [...CONTEXT_OPTIONS, "title", "file", "slug", "adr-number"],
+  ],
+  ["import", [...CONTEXT_OPTIONS, "yes", "project", "name"]],
+  ["issue-create", ["title", "body", "repo"]],
+  ["issues", ["state", "repo"]],
+  ["issue", ["repo"]],
+  ["issue-comment", ["body", "repo"]],
+  ["issue-close", ["reason", "repo"]],
+  ["issue-reopen", ["repo"]],
+]);
 
 class CliError extends Error {
   constructor(message, exitCode = 1) {
@@ -131,6 +201,14 @@ function hasOption(parsed, name) {
   return parsed.options.has(name);
 }
 
+function booleanFlag(parsed, name) {
+  const values = parsed.options.get(name) ?? [];
+  if (values.some((value) => value !== true)) {
+    throw new CliError(`--${name} does not take a value`);
+  }
+  return values.length > 0;
+}
+
 function optionList(parsed, name) {
   return (parsed.options.get(name) ?? []).flatMap((value) => {
     if (value === true || value === "") {
@@ -149,6 +227,29 @@ function requireOption(parsed, name) {
     throw new CliError(`--${name} is required`);
   }
   return String(value);
+}
+
+function assertKnownOptions(command, parsed) {
+  const allowed = COMMAND_OPTIONS.get(command);
+  if (!allowed) {
+    throw new CliError(`Unknown command: ${command}\n\n${HELP}`);
+  }
+  const allowedSet = new Set(allowed);
+  for (const name of parsed.options.keys()) {
+    if (!allowedSet.has(name)) {
+      throw new CliError(
+        `Unknown option --${name} for ao ${command}. Run \`ao help\` for supported options.`,
+      );
+    }
+  }
+}
+
+function rejectUnknownOptions(parsed, allowed) {
+  for (const name of parsed.options.keys()) {
+    if (!allowed.has(name)) {
+      throw new CliError(`Unknown option --${name}`);
+    }
+  }
 }
 
 function readJson(path, fallback = undefined) {
@@ -220,6 +321,107 @@ function validServerUrl(value) {
     : null;
 }
 
+function validIdentityValue(value) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function resolveIdentity(parsed, repositoryConfig = {}, options = {}) {
+  const environment = options.environment ?? process.env;
+  const defaults = options.defaults ?? {};
+  const explicitIdentifier = hasOption(parsed, "identifier")
+    ? requireOption(parsed, "identifier")
+    : null;
+  const explicitRole = hasOption(parsed, "role")
+    ? requireOption(parsed, "role")
+    : null;
+  const identifier =
+    validIdentityValue(explicitIdentifier) ??
+    validIdentityValue(environment.AO_IDENTIFIER) ??
+    validIdentityValue(repositoryConfig?.identifier) ??
+    validIdentityValue(defaults.identifier);
+  const role =
+    validIdentityValue(explicitRole) ??
+    validIdentityValue(environment.AO_ROLE) ??
+    validIdentityValue(repositoryConfig?.role) ??
+    validIdentityValue(defaults.role);
+
+  if (!identifier) {
+    throw new CliError(
+      "Cannot resolve the participant identifier. Pass --identifier, set AO_IDENTIFIER, or configure identifier in repository .ao/config.json.",
+    );
+  }
+  if (!role) {
+    throw new CliError(
+      "Cannot resolve the participant role. Pass --role, set AO_ROLE, or configure role in repository .ao/config.json.",
+    );
+  }
+  if (!["owner", "designer", "implementer"].includes(role)) {
+    throw new CliError(
+      `Invalid participant role ${JSON.stringify(role)}; expected owner, designer, or implementer.`,
+    );
+  }
+
+  return {
+    identifier,
+    role,
+    identifier_source: explicitIdentifier
+      ? "--identifier"
+      : validIdentityValue(environment.AO_IDENTIFIER)
+        ? "AO_IDENTIFIER"
+        : validIdentityValue(repositoryConfig?.identifier)
+          ? "repository .ao/config.json"
+          : "default",
+    role_source: explicitRole
+      ? "--role"
+      : validIdentityValue(environment.AO_ROLE)
+        ? "AO_ROLE"
+        : validIdentityValue(repositoryConfig?.role)
+          ? "repository .ao/config.json"
+          : "default",
+  };
+}
+
+function warnIdentityOverwrite(operation, configPath, existingConfig, identity) {
+  const changes = [];
+  const existingIdentifier = validIdentityValue(existingConfig?.identifier);
+  const existingRole = validIdentityValue(existingConfig?.role);
+  if (existingIdentifier && existingIdentifier !== identity.identifier) {
+    changes.push(
+      `identifier ${JSON.stringify(existingIdentifier)} -> ${JSON.stringify(identity.identifier)}`,
+    );
+  }
+  if (existingRole && existingRole !== identity.role) {
+    changes.push(
+      `role ${JSON.stringify(existingRole)} -> ${JSON.stringify(identity.role)}`,
+    );
+  }
+  if (changes.length === 0) {
+    return;
+  }
+  console.error(
+    `WARNING: ao ${operation} will overwrite agent identity in ${configPath}: ${changes.join(", ")}. Shared repositories need --identifier/--role or AO_IDENTIFIER/AO_ROLE per agent.`,
+  );
+}
+
+function warnIgnoredUserIdentity(configPath, config, { removing = false } = {}) {
+  const ignoredIdentity = [
+    validIdentityValue(config?.identifier)
+      ? `identifier=${JSON.stringify(config.identifier)}`
+      : null,
+    validIdentityValue(config?.role)
+      ? `role=${JSON.stringify(config.role)}`
+      : null,
+  ].filter(Boolean);
+  if (ignoredIdentity.length === 0) {
+    return;
+  }
+  console.error(
+    `WARNING: ${removing ? "ignoring and removing" : "ignoring"} agent identity from user configuration ${configPath}: ${ignoredIdentity.join(", ")}. Identity must come from --identifier/--role, AO_IDENTIFIER/AO_ROLE, or repository config.`,
+  );
+}
+
 function resolveServerUrl(parsed, options = {}) {
   const environment = options.environment ?? process.env;
   const fromEnvironment = validServerUrl(environment.AO_SERVER_URL);
@@ -247,6 +449,7 @@ function resolveServerUrl(parsed, options = {}) {
     homeDirectory: options.homeDirectory,
   });
   const userConfig = readJson(userPath);
+  warnIgnoredUserIdentity(userPath, userConfig);
   const fromUser = validServerUrl(userConfig?.server_url);
   if (fromUser) {
     return { server_url: fromUser, source: userPath };
@@ -262,17 +465,24 @@ function resolveServerUrl(parsed, options = {}) {
 function loadContext(parsed) {
   const repository = findRepository(option(parsed, "repo", process.cwd()));
   const configPath = join(repository, ".ao", "config.json");
-  const config = readJson(configPath);
-  if (!config) {
+  const repositoryConfig = readJson(configPath);
+  if (!repositoryConfig) {
     throw new CliError(`Missing configuration: ${configPath}`);
   }
-  config.server_url = resolveServerUrl(parsed).server_url;
-  if (!config.server_url || !config.project || !config.identifier || !config.role) {
+  const identity = resolveIdentity(parsed, repositoryConfig);
+  const config = {
+    ...repositoryConfig,
+    server_url: resolveServerUrl(parsed).server_url,
+    identifier: identity.identifier,
+    role: identity.role,
+  };
+  if (!config.server_url || !config.project) {
     throw new CliError(`${configPath} is missing required fields`);
   }
   return {
     config,
     configPath,
+    identity,
     repository,
     statePath: join(repository, ".ao", "state.json"),
   };
@@ -355,7 +565,13 @@ function configure(parsed) {
   const path = userConfigPath();
   const existing = readJson(path, {});
   const serverUrl = requireOption(parsed, "server");
-  writeJson(path, { ...existing, server_url: serverUrl });
+  warnIgnoredUserIdentity(path, existing, { removing: true });
+  const {
+    identifier: _ignoredIdentifier,
+    role: _ignoredRole,
+    ...serverDefaults
+  } = existing;
+  writeJson(path, { ...serverDefaults, server_url: serverUrl });
   return { path, server_url: serverUrl };
 }
 
@@ -407,13 +623,24 @@ async function deleteProjectCommand(parsed) {
   const project = requiredArgument(
     parsed,
     1,
-    "ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]",
+    "ao delete-project <PROJECT> --confirm PROJECT [--delete-nonempty] [--repo PATH]",
   );
+  const deleteNonempty = booleanFlag(parsed, "delete-nonempty");
+  const resolvedServer = resolveServerUrl(parsed);
+  const preview = await api(
+    resolvedServer,
+    "GET",
+    `/projects/${encodeURIComponent(project)}/deletion-preview`,
+  );
+  printDeletionPreview(preview);
   const query = new URLSearchParams({
     confirm: requireOption(parsed, "confirm"),
   });
+  if (deleteNonempty) {
+    query.set("delete_nonempty", "true");
+  }
   return api(
-    resolveServerUrl(parsed),
+    resolvedServer,
     "DELETE",
     `/projects/${encodeURIComponent(project)}?${query}`,
   );
@@ -423,21 +650,83 @@ async function deleteWorkCommand(parsed) {
   const project = requiredArgument(
     parsed,
     1,
-    "ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]",
+    "ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]",
   );
   const work = requiredArgument(
     parsed,
     2,
-    "ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]",
+    "ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]",
+  );
+  const deleteNonempty = booleanFlag(parsed, "delete-nonempty");
+  const resolvedServer = resolveServerUrl(parsed);
+  const preview = await api(
+    resolvedServer,
+    "GET",
+    `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}/deletion-preview`,
+  );
+  printDeletionPreview(preview);
+  const query = new URLSearchParams({
+    confirm: requireOption(parsed, "confirm"),
+  });
+  if (deleteNonempty) {
+    query.set("delete_nonempty", "true");
+  }
+  return api(
+    resolvedServer,
+    "DELETE",
+    `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}?${query}`,
+  );
+}
+
+async function deleteDocumentCommand(parsed) {
+  const project = requiredArgument(
+    parsed,
+    1,
+    "ao delete-document <PROJECT> <DOC> --confirm DOC [--repo PATH]",
+  );
+  const document = requiredArgument(
+    parsed,
+    2,
+    "ao delete-document <PROJECT> <DOC> --confirm DOC [--repo PATH]",
   );
   const query = new URLSearchParams({
     confirm: requireOption(parsed, "confirm"),
   });
+  const resolvedServer = resolveServerUrl(parsed);
   return api(
-    resolveServerUrl(parsed),
+    resolvedServer,
     "DELETE",
-    `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}?${query}`,
+    `/projects/${apiPath(project)}/documents/${apiPath(document)}?${query}`,
   );
+}
+
+function printDeletionPreview(preview) {
+  const target = preview.target.work
+    ? `${preview.target.project}/${preview.target.work}`
+    : preview.target.project;
+  const totals = preview.totals;
+  console.error(`Deletion preview for ${target}:`);
+  console.error(
+    `  projects=${totals.projects} works=${totals.works} messages=${totals.messages} participants=${totals.participants} documents=${totals.documents} revisions=${totals.revisions}`,
+  );
+  if (preview.works.length === 0) {
+    console.error("  works: none");
+    return;
+  }
+  for (const work of preview.works) {
+    const participants =
+      work.heartbeat_participants.length === 0
+        ? "none"
+        : work.heartbeat_participants
+            .map(
+              ({ identifier, last_heartbeat_at: heartbeat }) =>
+                `${identifier}@${heartbeat}`,
+            )
+            .join(",");
+    console.error(
+      `  work=${work.slug} messages=${work.message_count} last_updated_at=${work.last_updated_at} heartbeat_participants=${participants}`,
+    );
+  }
 }
 
 async function deleteParticipantCommand(parsed) {
@@ -460,6 +749,131 @@ async function deleteParticipantCommand(parsed) {
     resolveServerUrl(parsed),
     "DELETE",
     `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}/participants/${encodeURIComponent(identifier)}`,
+  );
+}
+
+function issueIdentity(context) {
+  return {
+    origin_project: context.config.project,
+    origin_identifier: context.config.identifier,
+    origin_role: context.config.role,
+    ...(context.config.work ? { origin_work: context.config.work } : {}),
+  };
+}
+
+function issueNumberArgument(parsed, index, usage) {
+  const number = Number(requiredArgument(parsed, index, usage));
+  if (!Number.isInteger(number) || number < 1) {
+    throw new CliError(`Usage: ${usage}`);
+  }
+  return number;
+}
+
+function assertPositionalCount(parsed, count, usage) {
+  if (parsed.positional.length !== count) {
+    throw new CliError(`Usage: ${usage}`);
+  }
+}
+
+async function issueCreateCommand(context, parsed) {
+  const usage =
+    "ao issue-create <PROJECT> --title TITLE --body TEXT [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["title", "body", "repo"]));
+  assertPositionalCount(parsed, 2, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues`,
+    {
+      title: requireOption(parsed, "title"),
+      body: requireOption(parsed, "body"),
+      ...issueIdentity(context),
+    },
+  );
+}
+
+async function issuesCommand(context, parsed) {
+  const usage = "ao issues [PROJECT] [--state open|closed|all] [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["state", "repo"]));
+  if (parsed.positional.length > 2) {
+    throw new CliError(`Usage: ${usage}`);
+  }
+  const state = String(option(parsed, "state", "open"));
+  if (!["open", "closed", "all"].includes(state)) {
+    throw new CliError("--state must be open, closed, or all");
+  }
+  const query = new URLSearchParams({ state });
+  const project = parsed.positional[1];
+  return project
+    ? api(
+        context.config,
+        "GET",
+        `/projects/${apiPath(String(project))}/issues?${query}`,
+      )
+    : api(context.config, "GET", `/issues?${query}`);
+}
+
+async function issueDetailCommand(context, parsed) {
+  const usage = "ao issue <PROJECT> <NUMBER> [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "GET",
+    `/projects/${apiPath(project)}/issues/${number}`,
+  );
+}
+
+async function issueCommentCommand(context, parsed) {
+  const usage =
+    "ao issue-comment <PROJECT> <NUMBER> --body TEXT [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["body", "repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues/${number}/comments`,
+    {
+      body: requireOption(parsed, "body"),
+      ...issueIdentity(context),
+    },
+  );
+}
+
+async function issueCloseCommand(context, parsed) {
+  const usage =
+    "ao issue-close <PROJECT> <NUMBER> --reason TEXT [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["reason", "repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues/${number}/close`,
+    {
+      reason: requireOption(parsed, "reason"),
+      ...issueIdentity(context),
+    },
+  );
+}
+
+async function issueReopenCommand(context, parsed) {
+  const usage = "ao issue-reopen <PROJECT> <NUMBER> [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues/${number}/reopen`,
+    {},
   );
 }
 
@@ -518,32 +932,34 @@ async function designProject(parsed) {
     "GET",
     `/projects/${apiPath(project.slug)}`,
   );
-  const existingConfig = readJson(join(repository, ".ao", "config.json"));
-  const identifier = String(
-    hasOption(parsed, "identifier")
-      ? requireOption(parsed, "identifier")
-      : existingConfig?.role === "designer"
-        ? existingConfig.identifier
-        : "designer",
-  ).trim();
-  if (!identifier) {
-    throw new CliError("--identifier must be non-empty");
+  const configPath = join(repository, ".ao", "config.json");
+  const existingConfig = readJson(configPath);
+  const existingDesignerConfig =
+    existingConfig?.role === "designer" ? existingConfig : {};
+  const identity = resolveIdentity(parsed, existingDesignerConfig, {
+    defaults: { identifier: "designer", role: "designer" },
+  });
+  if (identity.role !== "designer") {
+    throw new CliError(
+      `ao design requires role designer; resolved ${identity.role} from ${identity.role_source}.`,
+    );
   }
   const config = {
     server_url: listing.server.server_url,
     project: project.slug,
-    identifier,
-    role: "designer",
+    identifier: identity.identifier,
+    role: identity.role,
     cli: {
       command: process.execPath,
       args: [CLI_ENTRYPOINT],
     },
   };
+  warnIdentityOverwrite("design", configPath, existingConfig, identity);
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
-  writeJson(join(repository, ".ao", "config.json"), config);
+  writeJson(configPath, config);
   const context = {
     config,
-    configPath: join(repository, ".ao", "config.json"),
+    configPath,
     repository,
     statePath: join(repository, ".ao", "state.json"),
   };
@@ -591,6 +1007,7 @@ async function designProject(parsed) {
       your_ball: result.your_ball,
       idle_nudge: result.idle_nudge,
       abandoned: result.abandoned,
+      awaiting_activation: result.awaiting_activation,
       stale_expectations: result.stale_expectations,
       heartbeat_at: result.heartbeat_at,
     })),
@@ -630,7 +1047,9 @@ function roomLabel(room, index) {
   const heartbeat = room.presence?.last_heartbeat_at ?? "none";
   const ball = room.presence?.ball?.has_ball ?? false;
   const abandoned = room.presence?.abandoned ?? false;
-  return `${index + 1}. ${room.project.slug} / ${room.work.slug}  ${room.work.title}  slot=${expected} presence=${presence} heartbeat=${heartbeat} ball=${ball} abandoned=${abandoned} state=${room.work.state}`;
+  const awaitingActivation =
+    room.presence?.awaiting_activation ?? false;
+  return `${index + 1}. ${room.project.slug} / ${room.work.slug}  ${room.work.title}  slot=${expected} presence=${presence} heartbeat=${heartbeat} ball=${ball} abandoned=${abandoned} awaiting_activation=${awaitingActivation} state=${room.work.state}`;
 }
 
 async function roomsCommand(parsed) {
@@ -692,23 +1111,33 @@ async function joinRoom(parsed) {
   const listing = await fetchRooms(parsed);
   const room = selectRoom(listing.rooms, String(selection));
   const expected = room.expected_participant;
-  const identifierValue = hasOption(parsed, "identifier")
-    ? requireOption(parsed, "identifier")
-    : expected?.identifier;
-  if (
-    identifierValue === undefined ||
-    identifierValue === true ||
-    String(identifierValue).trim() === ""
-  ) {
+  let identity;
+  try {
+    identity = resolveIdentity(parsed, {}, {
+      defaults: {
+        identifier: expected?.identifier,
+        role: expected?.role ?? "implementer",
+      },
+    });
+  } catch (error) {
+    if (
+      error instanceof CliError &&
+      error.message.startsWith("Cannot resolve the participant identifier")
+    ) {
+      throw new CliError(
+        `Room ${room.project.slug}/${room.work.slug} has no implementer slot. Ask the owner for an identifier, then repeat with --identifier ID.`,
+        2,
+      );
+    }
+    throw error;
+  }
+  const identifier = identity.identifier;
+  const role = identity.role;
+  if (!identifier) {
     throw new CliError(
       `Room ${room.project.slug}/${room.work.slug} has no implementer slot. Ask the owner for an identifier, then repeat with --identifier ID.`,
       2,
     );
-  }
-  const identifier = String(identifierValue).trim();
-  const role = String(option(parsed, "role", expected?.role ?? "implementer"));
-  if (!["owner", "designer", "implementer"].includes(role)) {
-    throw new CliError("--role must be owner, designer, or implementer");
   }
   const occupyingExpectedSlot =
     expected?.identifier === identifier && room.presence?.present;
@@ -730,11 +1159,14 @@ async function joinRoom(parsed) {
       args: [CLI_ENTRYPOINT],
     },
   };
+  const configPath = join(repository, ".ao", "config.json");
+  const existingConfig = readJson(configPath, {});
+  warnIdentityOverwrite("join", configPath, existingConfig, identity);
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
-  writeJson(join(repository, ".ao", "config.json"), config);
+  writeJson(configPath, config);
   const context = {
     config,
-    configPath: join(repository, ".ao", "config.json"),
+    configPath,
     repository,
     statePath: join(repository, ".ao", "state.json"),
   };
@@ -764,6 +1196,7 @@ async function joinRoom(parsed) {
     your_ball: thread.your_ball,
     idle_nudge: thread.idle_nudge,
     abandoned: thread.abandoned,
+    awaiting_activation: thread.awaiting_activation,
     stale_expectations: thread.stale_expectations,
     skills,
     next: [
@@ -1244,6 +1677,9 @@ async function inject(parsed) {
   const selectedWorkTitle = hasOption(parsed, "work-title")
     ? requireOption(parsed, "work-title")
     : undefined;
+  const configPath = join(repository, ".ao", "config.json");
+  const existingConfig = readJson(configPath, {});
+  const identity = resolveIdentity(parsed, existingConfig);
   let serverUrl = option(parsed, "server");
   if (serverUrl === undefined) {
     try {
@@ -1255,18 +1691,14 @@ async function inject(parsed) {
   const config = {
     server_url: String(serverUrl),
     project: String(project),
-    identifier: requireOption(parsed, "identifier"),
-    role: requireOption(parsed, "role"),
+    identifier: identity.identifier,
+    role: identity.role,
     cli: {
       command: process.execPath,
       args: [CLI_ENTRYPOINT],
     },
     ...(selectedWork ? { work: String(selectedWork) } : {}),
   };
-  if (!["owner", "designer", "implementer"].includes(config.role)) {
-    throw new CliError("--role must be owner, designer, or implementer");
-  }
-
   try {
     await api(config, "POST", "/projects", {
       slug: config.project,
@@ -1307,8 +1739,9 @@ async function inject(parsed) {
     }
   }
 
+  warnIdentityOverwrite("inject", configPath, existingConfig, identity);
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
-  writeJson(join(repository, ".ao", "config.json"), config);
+  writeJson(configPath, config);
   const context = {
     config,
     repository,
@@ -1390,6 +1823,11 @@ function emitPoll(result, prefix = "") {
   for (const participant of result.abandoned) {
     console.log(
       `${prefix}ABANDONED identifier=${participant.identifier} last_heartbeat_at=${participant.last_heartbeat_at ?? "never"} reasons=${JSON.stringify(participant.ball_reasons)}`,
+    );
+  }
+  for (const participant of result.awaiting_activation ?? []) {
+    console.log(
+      `${prefix}AWAITING_ACTIVATION identifier=${participant.identifier} last_heartbeat_at=${participant.last_heartbeat_at ?? "never"} reasons=${JSON.stringify(participant.ball_reasons)}`,
     );
   }
   for (const expectation of result.stale_expectations) {
@@ -1488,7 +1926,7 @@ async function watchProject(context, parsed) {
       }
       for (const { work, result } of results) {
         console.log(
-          `PROJECT_WORK project=${context.config.project} work=${work.slug} heartbeat=${result.heartbeat_at ?? "none"} ball=${result.your_ball.has_ball} idle=${result.idle_nudge !== null} abandoned=${result.abandoned.length}`,
+          `PROJECT_WORK project=${context.config.project} work=${work.slug} heartbeat=${result.heartbeat_at ?? "none"} ball=${result.your_ball.has_ball} idle=${result.idle_nudge !== null} abandoned=${result.abandoned.length} awaiting_activation=${(result.awaiting_activation ?? []).length}`,
         );
         emitPoll(
           result,
@@ -1527,6 +1965,7 @@ export async function main(argv) {
     process.stdout.write(HELP);
     return;
   }
+  assertKnownOptions(command, parsed);
 
   if (command === "inject") {
     print(await inject(parsed));
@@ -1563,12 +2002,40 @@ export async function main(argv) {
     print(await deleteWorkCommand(parsed));
     return;
   }
+  if (command === "delete-document") {
+    print(await deleteDocumentCommand(parsed));
+    return;
+  }
   if (command === "delete-participant") {
     print(await deleteParticipantCommand(parsed));
     return;
   }
 
   const context = loadContext(parsed);
+  if (command === "issue-create") {
+    print(await issueCreateCommand(context, parsed));
+    return;
+  }
+  if (command === "issues") {
+    print(await issuesCommand(context, parsed));
+    return;
+  }
+  if (command === "issue") {
+    print(await issueDetailCommand(context, parsed));
+    return;
+  }
+  if (command === "issue-comment") {
+    print(await issueCommentCommand(context, parsed));
+    return;
+  }
+  if (command === "issue-close") {
+    print(await issueCloseCommand(context, parsed));
+    return;
+  }
+  if (command === "issue-reopen") {
+    print(await issueReopenCommand(context, parsed));
+    return;
+  }
   if (command === "pull") {
     await activeHeartbeat(context, parsed);
     print(
@@ -1666,12 +2133,40 @@ export async function main(argv) {
     );
     return;
   }
+  if (command === "set-work-implementer") {
+    const work = parsed.positional[1];
+    if (!work) {
+      throw new CliError("set-work-implementer requires a work slug");
+    }
+    print(
+      await api(
+        context.config,
+        "PATCH",
+        `/projects/${apiPath(context.config.project)}/works/${apiPath(work)}`,
+        {
+          implementer: requireOption(parsed, "implementer"),
+        },
+      ),
+    );
+    return;
+  }
   if (command === "create-document") {
     const kind = parsed.positional[1];
     if (!kind) {
       throw new CliError("create-document requires a kind");
     }
     const file = requireOption(parsed, "file");
+    const adrNumberOption = option(parsed, "adr-number");
+    if (kind !== "adr" && adrNumberOption !== undefined) {
+      throw new CliError("--adr-number applies only to create-document adr");
+    }
+    let adrNumber;
+    if (adrNumberOption !== undefined) {
+      adrNumber = Number(adrNumberOption);
+      if (!Number.isInteger(adrNumber) || adrNumber < 1) {
+        throw new CliError("--adr-number must be a positive integer");
+      }
+    }
     print(
       await api(
         context.config,
@@ -1683,6 +2178,9 @@ export async function main(argv) {
           body: readFileSync(file, "utf8"),
           author: context.config.identifier,
           ...(option(parsed, "slug") ? { slug: option(parsed, "slug") } : {}),
+          ...(adrNumber === undefined
+            ? {}
+            : { adr_number: adrNumber }),
         },
       ),
     );
@@ -1702,6 +2200,7 @@ export const cliInternals = {
   hash,
   parseArguments,
   projectSlug,
+  resolveIdentity,
   resolveServerUrl,
   selectRoom,
   stripCopyHeader,

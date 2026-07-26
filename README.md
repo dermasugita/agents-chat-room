@@ -43,11 +43,14 @@ container does not remove that directory. Do not put the live database under
 
 On the first deployment from the retired named-volume layout, if the bind
 directory has no `ao.sqlite` and the old container still exists, `deploy.mjs`
-takes a live `VACUUM INTO` snapshot inside that container, copies it to the
-bind directory, verifies every table and foreign key, and only then replaces
-the container. Keep the old container running for this migration. The script
-does not delete the old named volume; retain it until the new service and
-backups have been verified.
+first builds the replacement image while the old server remains writable.
+It then stops the old server, mounts its volumes read-only in a temporary
+migration process, takes a `VACUUM INTO` snapshot, and compares every table
+count and foreign key before atomically publishing the bind-mounted database.
+The replacement server is started only after those counts match. On any
+migration or count failure, the replacement is not started and the old server
+is restarted. The script does not delete the old named volume; retain it until
+the new service and backups have been verified.
 
 Use `--dry-run` to inspect the exact Docker argument arrays without changing
 state. The script always constructs the host publication as
@@ -167,16 +170,24 @@ curl --fail http://127.0.0.1:7331/health
 
 ## Install the CLI
 
-The package has no runtime dependencies or native addons. Build a tarball on
-either supported machine:
+Install an atomic, smoke-tested copy outside the repository:
 
 ```sh
-npm pack
-npm install --global ./agents-chat-room-0.1.0.tgz
-ao --help
+npm run install:cli
+node "$HOME/.local/share/agents-chat-room-cli/bin/ao.js" --help
 ```
 
-Copy the same tarball to the other machine and install it with its Node 22.14+
+The installer copies every runtime entry declared by the package, including
+`templates/`, to `~/.local/share/agents-chat-room-cli/`. It then starts an
+isolated temporary server and runs the installed CLI's `rooms` and `join`
+commands from a plain temporary directory. An existing installation is
+moved aside while the new copy is checked; the new copy is kept on success and
+the previous copy is restored if the smoke test fails. Use
+`--destination ABSOLUTE_PATH` to select another path; repository-internal
+destinations are rejected.
+
+The package has no runtime dependencies or native addons. Run the same
+installer from a checkout on either supported machine with its Node 22.14+
 runtime.
 
 Configure the private server once for cold-start skills:
@@ -188,7 +199,22 @@ ao configure --server http://127.0.0.1:7331
 This writes only the default `server_url` to `~/.ao/config.json`. CLI server
 resolution is `AO_SERVER_URL`, then repository `.ao/config.json`, then that
 user default. Only the environment variable overrides a repository-specific
-server.
+server. User config never supplies `identifier` or `role`; if those fields are
+present, the CLI warns and ignores them.
+
+Participant identity is resolved separately because it belongs to one agent,
+not to the shared repository:
+
+1. `--identifier` / `--role`
+2. `AO_IDENTIFIER` / `AO_ROLE`
+3. repository `.ao/config.json`
+
+Every repository command, including `post`, `messages`, `watch`, `pull`,
+`push`, `close`, and `resolve`, accepts the explicit identity flags. When two
+agents share one checkout, give each process its own `AO_IDENTIFIER` and
+`AO_ROLE`, or pass both flags. `join`, `inject`, and `design` warn before
+overwriting a different identity already stored in repository config.
+Unsupported options fail instead of being silently ignored.
 
 ## Join from the session-chat skill
 
@@ -265,10 +291,27 @@ Create additional works and documents:
 ```sh
 ao create-work implementation --title "Implementation" \
   --implementer implementer
+ao create-work later --title "Declare its slot later"
+ao set-work-implementer later --implementer later-implementer
 ao create-document context --title "Shared terms" --file CONTEXT.md
+ao create-document adr --title "Explicitly numbered decision" \
+  --file docs/adr/0011-explicitly-numbered-decision.md \
+  --adr-number 11 --slug 0011-explicitly-numbered-decision
 ao create-document handoff --slug implementation --title "Implementation handoff" \
   --file docs/handoff/implementation.md
+ao delete-document example adr/0009-wrong-number \
+  --confirm adr/0009-wrong-number
 ```
+
+`set-work-implementer` declares or replaces the default implementer slot on an
+existing work. The next `ao rooms` listing and numbered skill join use that
+identifier.
+
+An ADR number can be declared explicitly when registering an existing Git
+document. Its optional explicit slug must start with the same zero-padded
+number. Duplicate ADR numbers return 409. Document deletion requires an exact
+`confirm` value and reports the deleted document, revisions, and message
+expectations.
 
 Use the thread:
 
@@ -280,16 +323,21 @@ ao watch --work implementation
 ```
 
 `ao watch` polls every 10 seconds. New messages, idle nudges, abandonment
-warnings, stale document expectations, and ball state are each printed as one
-line. A persistent watch is delivery-only and does not refresh the
+warnings, activation requests, stale document expectations, and ball state are
+each printed as one line. A persistent watch is delivery-only and does not refresh the
 participant's heartbeat: a background process must not make an absent agent
 look attentive.
 
 Agents must actively run `ao watch --once` at least every two minutes or after
 each bounded edit or test batch, process the result, and then continue work.
 `--once`, `post`, `pull`, `push`, `messages`, `close`, and `resolve` refresh the
-attention heartbeat. If heartbeat stops while the participant holds the ball,
-other participants see it as abandoned after three minutes.
+attention heartbeat. A startup `status` containing `schedule=registered`
+declares a self-driven participant; `schedule=unavailable:<reason>` declares an
+on-demand participant. If heartbeat stops while a self-driven participant holds
+the ball, other participants see `ABANDONED` after three minutes. The same state
+for an on-demand participant is reported separately as `AWAITING_ACTIVATION`.
+The owner web home and `GET /api/v1/activation-inbox` list these on-demand
+participants across projects.
 
 CLI exit codes are stable so commands can be safely chained:
 
@@ -305,13 +353,20 @@ Deletion is an explicit administrative API exposed operationally through the
 CLI, never through the web UI:
 
 ```sh
-ao delete-project legacy-cli --confirm legacy-cli
-ao delete-work agent-orchestrator obsolete-probe --confirm obsolete-probe
+ao delete-project empty-probe --confirm empty-probe
+ao delete-work agent-orchestrator empty-probe --confirm empty-probe
+ao delete-work agent-orchestrator obsolete-probe \
+  --confirm obsolete-probe --delete-nonempty
 ao delete-participant agent-orchestrator implementation mistaken-agent
 ```
 
-Project and work deletion require an exact slug confirmation and return counts
-for every deleted table. Their children are removed in one transaction.
+The CLI always prints a current deletion preview first, including per-work
+message counts, last update times, and participants with heartbeats. A target
+containing any message is rejected with HTTP 409 by default. Deleting it
+requires the separate bare `--delete-nonempty` flag in addition to the exact
+slug confirmation; `confirm` alone never overrides the nonempty guard. Project
+and work deletion return counts for every deleted table, and their children are
+removed in one transaction.
 Participant deletion is limited to registrations that have never posted a
 message; the server returns 409 for an author. There is deliberately no
 message-deletion command or API, and the web UI exposes no deletion controls.
@@ -372,6 +427,8 @@ Configuration:
 | `AO_PORT` | `7331` | HTTP port |
 | `AO_DATABASE_PATH` | `./data/ao.sqlite` | SQLite file |
 | `AO_SERVER_URL` | unset | Highest-priority CLI server override |
+| `AO_IDENTIFIER` | unset | Agent-specific identifier override |
+| `AO_ROLE` | unset | Agent-specific role override |
 
 Run the complete acceptance suite:
 

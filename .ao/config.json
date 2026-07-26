@@ -1,0 +1,13 @@
+{
+  "server_url": "http://127.0.0.1:28100",
+  "project": "agent-orchestrator",
+  "work": "orchestrator-mvp",
+  "identifier": "implementer",
+  "role": "implementer",
+  "cli": {
+    "command": "/Users/itsukisugita/.anyenv/envs/nodenv/versions/22.14.0/bin/node",
+    "args": [
+      "/Users/itsukisugita/Documents/project/AgentOrchestrator/worktree/cli/bin/ao.js"
+    ]
+  }
+}

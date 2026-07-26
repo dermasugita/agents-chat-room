@@ -1,0 +1,76 @@
+{
+  "documents": {
+    "context": {
+      "body_hash": "dc05bb740714fb325b671c19ff064cd60fd710631e93d0a4a2607d46bc2f33a3",
+      "path": ".ao/docs/CONTEXT.md",
+      "revision": 1
+    },
+    "adr/0001-documents-source-of-truth-in-db": {
+      "body_hash": "806a3ae39c1353778184b56fe48abf172e371a6744e6dc443319d3f7ce0a0251",
+      "path": ".ao/docs/adr/0001-documents-source-of-truth-in-db.md",
+      "revision": 1
+    },
+    "adr/0002-passive-server-per-thread-designers": {
+      "body_hash": "091ec7fa3ba2fdb7c083d64d14b11f2a431dc26d041b650c5d067fc0969447d3",
+      "path": ".ao/docs/adr/0002-passive-server-per-thread-designers.md",
+      "revision": 1
+    },
+    "adr/0003-cli-only-client-and-polling": {
+      "body_hash": "2aa45ee88a0d69c7f0f3a07e3fedc8c5a9b41c2255642fda449a7ad3cdbf7d4d",
+      "path": ".ao/docs/adr/0003-cli-only-client-and-polling.md",
+      "revision": 1
+    },
+    "adr/0004-no-authentication": {
+      "body_hash": "90095596065b71781f577aa0e662c5e800306a9952355ab50a3b0e780c711af3",
+      "path": ".ao/docs/adr/0004-no-authentication.md",
+      "revision": 1
+    },
+    "adr/0005-full-text-put-with-optimistic-lock": {
+      "body_hash": "e7c4f67b7d107e2d80f8650fea35fb8c0c22ee01c0159c28daa35752f3957d99",
+      "path": ".ao/docs/adr/0005-full-text-put-with-optimistic-lock.md",
+      "revision": 1
+    },
+    "adr/0006-ball-tracking-and-heartbeat": {
+      "body_hash": "a4c3c0f54f5dc2eee54ad550c42684790e05958ebd06afbd7b30975b8e214188",
+      "path": ".ao/docs/adr/0006-ball-tracking-and-heartbeat.md",
+      "revision": 1
+    },
+    "adr/0007-web-viewer-is-the-owner-endpoint": {
+      "body_hash": "86f7e1f8b4884ec6fc288d52b48001b04f5de32e2a8de8191f41b93f8d437c43",
+      "path": ".ao/docs/adr/0007-web-viewer-is-the-owner-endpoint.md",
+      "revision": 1
+    },
+    "adr/0008-injection-into-target-repositories": {
+      "body_hash": "7688991bb545d445a58cd2fa4c3dfb5b96150a3476076f64e8158037e63240b8",
+      "path": ".ao/docs/adr/0008-injection-into-target-repositories.md",
+      "revision": 1
+    },
+    "handoff/orchestrator-mvp": {
+      "body_hash": "2e56437443257482234815e627f71948c9d793614898f09a40d6f080f4e454d0",
+      "path": ".ao/docs/handoff/orchestrator-mvp.md",
+      "revision": 1
+    },
+    "handoff/ui-review": {
+      "body_hash": "26891cccb0d849ef4b20d53ee6b93a293c99d9d169d3048b3e451411e08e0c2e",
+      "path": ".ao/docs/handoff/ui-review.md",
+      "revision": 9
+    },
+    "adr/0009-adr-0011": {
+      "body_hash": "a4c42011faed100569d1b221e3e4168bcf3c831d344c7ec91ac6220761544f40",
+      "path": ".ao/docs/adr/0009-adr-0011.md",
+      "revision": 1
+    },
+    "handoff/issue-tracker": {
+      "body_hash": "26a3277d806d696712a51e1eb528709a31c8f2c12ba74263d3839160a9de7970",
+      "path": ".ao/docs/handoff/issue-tracker.md",
+      "revision": 3
+    }
+  },
+  "server_url": "http://127.0.0.1:28100",
+  "project": "agent-orchestrator",
+  "project_messages": {
+    "issue-tracker": 16,
+    "orchestrator-mvp": 37,
+    "ui-review": 26
+  }
+}

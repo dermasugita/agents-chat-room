@@ -11,6 +11,7 @@ const MESSAGE_TYPES = new Set([
   "resolve",
 ]);
 const ROLES = new Set(["owner", "designer", "implementer"]);
+const ATTENDANCE_MODES = new Set(["self-driven", "on-demand"]);
 const DOCUMENT_KINDS = new Set(["context", "adr", "handoff"]);
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ABANDONED_AFTER_MS = 3 * 60 * 1_000;
@@ -49,6 +50,22 @@ function normalizeTime(value) {
     `Invalid timestamp: ${value}`,
   );
   return parsed.toISOString();
+}
+
+function attendanceModeFromStatus(input) {
+  if (input.type !== "status" || typeof input.body !== "string") {
+    return undefined;
+  }
+  const schedule = input.body.match(
+    /(?:^|\s)schedule=(registered|unavailable)(?=[:(\s]|$)/,
+  )?.[1];
+  if (schedule === "registered") {
+    return "self-driven";
+  }
+  if (schedule === "unavailable") {
+    return "on-demand";
+  }
+  return undefined;
 }
 
 export function createStore(database, options = {}) {
@@ -199,7 +216,9 @@ export function createStore(database, options = {}) {
 
   function registerParticipant(workId, identifier, role, seenAt) {
     const existing = database
-      .prepare("SELECT role FROM participant WHERE work_id = ? AND identifier = ?")
+      .prepare(
+        "SELECT role FROM participant WHERE work_id = ? AND identifier = ?",
+      )
       .get(workId, identifier);
     if (existing) {
       assert(
@@ -214,13 +233,33 @@ export function createStore(database, options = {}) {
       );
       return;
     }
+    const inheritedAttendance = database
+      .prepare(
+        `SELECT project_participant.attendance_mode
+         FROM work AS current_work
+         JOIN work AS project_work
+           ON project_work.project_id = current_work.project_id
+         JOIN participant AS project_participant
+           ON project_participant.work_id = project_work.id
+         WHERE current_work.id = ?
+           AND project_participant.identifier = ?
+         LIMIT 1`,
+      )
+      .get(workId, identifier)?.attendance_mode;
     database
       .prepare(
         `INSERT INTO participant(
-           work_id, identifier, role, first_seen_at, last_heartbeat_at
-         ) VALUES (?, ?, ?, ?, NULL)`,
+           work_id, identifier, role, attendance_mode,
+           first_seen_at, last_heartbeat_at
+         ) VALUES (?, ?, ?, ?, ?, NULL)`,
       )
-      .run(workId, identifier, role, seenAt);
+      .run(
+        workId,
+        identifier,
+        role,
+        inheritedAttendance ?? "self-driven",
+        seenAt,
+      );
   }
 
   function touchParticipant(workId, identifier, role, seenAt) {
@@ -233,6 +272,29 @@ export function createStore(database, options = {}) {
         )
         .run(seenAt, workId, identifier);
     }
+  }
+
+  function setAttendanceMode(workId, identifier, attendanceMode) {
+    assert(
+      ATTENDANCE_MODES.has(attendanceMode),
+      400,
+      "invalid_request",
+      "attendance_mode is invalid",
+    );
+    database
+      .prepare(
+        `UPDATE participant
+         SET attendance_mode = ?
+         WHERE identifier = ?
+           AND work_id IN (
+             SELECT project_work.id
+             FROM work AS current_work
+             JOIN work AS project_work
+               ON project_work.project_id = current_work.project_id
+             WHERE current_work.id = ?
+           )`,
+      )
+      .run(attendanceMode, identifier, workId);
   }
 
   function ballFor(workId, identifier) {
@@ -338,13 +400,33 @@ export function createStore(database, options = {}) {
       .map((participant) => {
         const ball = ballFor(workId, participant.identifier);
         const heartbeat = participant.last_heartbeat_at ?? participant.first_seen_at;
-        const abandoned =
+        const projectActivity = database
+          .prepare(
+            `SELECT MAX(
+               COALESCE(project_participant.last_heartbeat_at,
+                        project_participant.first_seen_at)
+             ) AS latest
+             FROM work AS current_work
+             JOIN work AS project_work
+               ON project_work.project_id = current_work.project_id
+             JOIN participant AS project_participant
+               ON project_participant.work_id = project_work.id
+             WHERE current_work.id = ?
+               AND project_participant.identifier = ?`,
+          )
+          .get(workId, participant.identifier).latest;
+        const staleWithBall =
           participant.role !== "owner" &&
           ball.has_ball &&
-          new Date(heartbeat).getTime() < cutoff;
+          new Date(projectActivity ?? heartbeat).getTime() < cutoff;
+        const abandoned =
+          staleWithBall && participant.attendance_mode === "self-driven";
+        const awaitingActivation =
+          staleWithBall && participant.attendance_mode === "on-demand";
         return {
           identifier: participant.identifier,
           role: participant.role,
+          attendance_mode: participant.attendance_mode,
           first_seen_at: participant.first_seen_at,
           last_heartbeat_at: participant.last_heartbeat_at,
           present:
@@ -352,6 +434,7 @@ export function createStore(database, options = {}) {
             new Date(participant.last_heartbeat_at).getTime() >= cutoff,
           ball,
           abandoned,
+          awaiting_activation: awaitingActivation,
         };
       });
   }
@@ -378,6 +461,276 @@ export function createStore(database, options = {}) {
     };
   }
 
+  function requireIssueIdentity(input) {
+    const originProject = requireSlug(input?.origin_project, "origin_project");
+    assert(
+      typeof input?.origin_identifier === "string" &&
+        input.origin_identifier.trim(),
+      400,
+      "invalid_request",
+      "origin_identifier is required",
+    );
+    assert(
+      ROLES.has(input?.origin_role),
+      400,
+      "invalid_request",
+      "origin_role is invalid",
+    );
+    const originWork =
+      input?.origin_work === undefined || input.origin_work === null
+        ? null
+        : requireSlug(input.origin_work, "origin_work");
+    return {
+      origin_project: originProject,
+      origin_identifier: input.origin_identifier.trim(),
+      origin_role: input.origin_role,
+      origin_work: originWork,
+    };
+  }
+
+  function requireIssueNumber(value) {
+    const number = Number(value);
+    assert(
+      Number.isInteger(number) && number > 0,
+      400,
+      "invalid_request",
+      "issue number must be a positive integer",
+    );
+    return number;
+  }
+
+  function requireIssueState(value = "open") {
+    assert(
+      value === "open" || value === "closed" || value === "all",
+      400,
+      "invalid_request",
+      "state must be open, closed, or all",
+    );
+    return value;
+  }
+
+  function issueByNumber(projectSlug, requestedNumber) {
+    const project = projectBySlug(projectSlug);
+    const number = requireIssueNumber(requestedNumber);
+    const issue = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE issue.project_id = ? AND issue.number = ?`,
+      )
+      .get(project.id, number);
+    assert(
+      issue,
+      404,
+      "issue_not_found",
+      `Issue not found: ${projectSlug}#${number}`,
+    );
+    return issue;
+  }
+
+  function serializeIssue(row, comments = undefined) {
+    const {
+      id: _id,
+      project_id: _projectId,
+      project_slug: project,
+      project_name: projectName,
+      ...issue
+    } = row;
+    return {
+      project,
+      project_name: projectName,
+      ...issue,
+      ...(comments === undefined ? {} : { comments }),
+    };
+  }
+
+  function serializeIssueComment(row) {
+    const { id: _id, issue_id: _issueId, ...comment } = row;
+    return comment;
+  }
+
+  function createIssue(projectSlug, input) {
+    const project = projectBySlug(projectSlug);
+    assert(
+      typeof input?.title === "string" && input.title.trim(),
+      400,
+      "invalid_request",
+      "title is required",
+    );
+    assert(
+      typeof input?.body === "string",
+      400,
+      "invalid_request",
+      "body is required",
+    );
+    const identity = requireIssueIdentity(input);
+    return inTransaction(database, () => {
+      const number = database
+        .prepare(
+          "SELECT COALESCE(MAX(number), 0) + 1 AS next FROM issue WHERE project_id = ?",
+        )
+        .get(project.id).next;
+      database
+        .prepare(
+          `INSERT INTO issue(
+             project_id, number, title, body, state,
+             origin_project, origin_identifier, origin_role, origin_work,
+             created_at, closed_at, closed_by, close_reason
+           ) VALUES (?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+        )
+        .run(
+          project.id,
+          number,
+          input.title.trim(),
+          input.body,
+          identity.origin_project,
+          identity.origin_identifier,
+          identity.origin_role,
+          identity.origin_work,
+          now(),
+        );
+      return serializeIssue(issueByNumber(projectSlug, number));
+    });
+  }
+
+  function listIssues(projectSlug, state = "open") {
+    const project = projectBySlug(projectSlug);
+    const selectedState = requireIssueState(state);
+    const rows = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE issue.project_id = ?
+           AND (? = 'all' OR issue.state = ?)
+         ORDER BY issue.number`,
+      )
+      .all(project.id, selectedState, selectedState);
+    return rows.map((row) => serializeIssue(row));
+  }
+
+  function listIssuesAcrossProjects(state = "open") {
+    const selectedState = requireIssueState(state);
+    const rows = database
+      .prepare(
+        `SELECT issue.*, project.slug AS project_slug, project.name AS project_name
+         FROM issue JOIN project ON project.id = issue.project_id
+         WHERE ? = 'all' OR issue.state = ?
+         ORDER BY project.slug, issue.number`,
+      )
+      .all(selectedState, selectedState);
+    const projects = [];
+    for (const row of rows) {
+      let group = projects.at(-1);
+      if (!group || group.project.slug !== row.project_slug) {
+        group = {
+          project: { slug: row.project_slug, name: row.project_name },
+          issues: [],
+        };
+        projects.push(group);
+      }
+      group.issues.push(serializeIssue(row));
+    }
+    return projects;
+  }
+
+  function getIssue(projectSlug, requestedNumber) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    const comments = database
+      .prepare(
+        "SELECT * FROM issue_comment WHERE issue_id = ? ORDER BY seq",
+      )
+      .all(issue.id)
+      .map(serializeIssueComment);
+    return serializeIssue(issue, comments);
+  }
+
+  function addIssueComment(projectSlug, requestedNumber, input) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    assert(
+      typeof input?.body === "string" && input.body.trim(),
+      400,
+      "invalid_request",
+      "body is required",
+    );
+    const identity = requireIssueIdentity(input);
+    return inTransaction(database, () => {
+      const seq = database
+        .prepare(
+          "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM issue_comment WHERE issue_id = ?",
+        )
+        .get(issue.id).next;
+      const result = database
+        .prepare(
+          `INSERT INTO issue_comment(
+             issue_id, seq, body, origin_project, origin_identifier,
+             origin_role, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          issue.id,
+          seq,
+          input.body,
+          identity.origin_project,
+          identity.origin_identifier,
+          identity.origin_role,
+          now(),
+        );
+      return serializeIssueComment(
+        database
+          .prepare("SELECT * FROM issue_comment WHERE id = ?")
+          .get(result.lastInsertRowid),
+      );
+    });
+  }
+
+  function closeIssue(projectSlug, requestedNumber, input) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    assert(
+      typeof input?.reason === "string" && input.reason.trim(),
+      400,
+      "invalid_request",
+      "reason is required",
+    );
+    const identity = requireIssueIdentity(input);
+    assert(
+      issue.state === "open",
+      409,
+      "issue_already_closed",
+      `Issue is already closed: ${projectSlug}#${issue.number}`,
+    );
+    database
+      .prepare(
+        `UPDATE issue
+         SET state = 'closed', closed_at = ?, closed_by = ?, close_reason = ?
+         WHERE id = ?`,
+      )
+      .run(
+        now(),
+        `${identity.origin_project}/${identity.origin_identifier}`,
+        input.reason.trim(),
+        issue.id,
+      );
+    return getIssue(projectSlug, issue.number);
+  }
+
+  function reopenIssue(projectSlug, requestedNumber) {
+    const issue = issueByNumber(projectSlug, requestedNumber);
+    assert(
+      issue.state === "closed",
+      409,
+      "issue_already_open",
+      `Issue is already open: ${projectSlug}#${issue.number}`,
+    );
+    database
+      .prepare(
+        `UPDATE issue
+         SET state = 'open', closed_at = NULL, closed_by = NULL, close_reason = NULL
+         WHERE id = ?`,
+      )
+      .run(issue.id);
+    return getIssue(projectSlug, issue.number);
+  }
+
   function health() {
     return {
       status: "ok",
@@ -392,7 +745,10 @@ export function createStore(database, options = {}) {
       .prepare(
         `SELECT project.*,
                 (SELECT COUNT(*) FROM work WHERE work.project_id = project.id) AS work_count,
-                (SELECT COUNT(*) FROM document WHERE document.project_id = project.id) AS document_count
+                (SELECT COUNT(*) FROM document WHERE document.project_id = project.id) AS document_count,
+                (SELECT COUNT(*) FROM issue WHERE issue.project_id = project.id) AS issue_count,
+                (SELECT COUNT(*) FROM issue
+                 WHERE issue.project_id = project.id AND issue.state = 'open') AS open_issue_count
          FROM project
          ORDER BY project.slug`,
       )
@@ -478,6 +834,29 @@ export function createStore(database, options = {}) {
     );
   }
 
+  function setWorkImplementer(projectSlug, workSlug, input) {
+    const work = workBySlug(projectSlug, workSlug);
+    const implementer =
+      input?.implementer === undefined || input.implementer === null
+        ? ""
+        : String(input.implementer).trim();
+    assert(
+      implementer.length > 0,
+      400,
+      "invalid_request",
+      "implementer must be a non-empty identifier",
+    );
+    database
+      .prepare(
+        `UPDATE work
+         SET expected_participant_identifier = ?,
+             expected_participant_role = 'implementer'
+         WHERE id = ?`,
+      )
+      .run(implementer, work.id);
+    return getWork(projectSlug, workSlug);
+  }
+
   function resolveWork(projectSlug, workSlug) {
     const work = workBySlug(projectSlug, workSlug);
     database.prepare("UPDATE work SET state = 'resolved' WHERE id = ?").run(work.id);
@@ -492,6 +871,8 @@ export function createStore(database, options = {}) {
       participants: 0,
       documents: 0,
       revisions: 0,
+      issues: 0,
+      issue_comments: 0,
       message_recipients: 0,
       message_refs: 0,
       message_expectations: 0,
@@ -513,10 +894,167 @@ export function createStore(database, options = {}) {
     );
   }
 
-  function deleteProject(projectSlug, confirmation) {
+  function deleteDocument(projectSlug, identifier, confirmation) {
+    requireDeletionConfirmation(identifier, confirmation);
+    return inTransaction(database, () => {
+      const project = projectBySlug(projectSlug);
+      const document = documentRow(project.id, identifier);
+      const deleted = emptyDeletionCounts();
+      deleted.message_expectations = deletedRows(
+        "DELETE FROM message_expects WHERE document_id = ?",
+        document.id,
+      );
+      deleted.revisions = deletedRows(
+        "DELETE FROM revision WHERE document_id = ?",
+        document.id,
+      );
+      deleted.documents = deletedRows(
+        "DELETE FROM document WHERE id = ?",
+        document.id,
+      );
+      return {
+        target: { project: projectSlug, document: identifier },
+        deleted,
+      };
+    });
+  }
+
+  function workDeletionSummary(work) {
+    const messageActivity = database
+      .prepare(
+        `SELECT COUNT(*) AS message_count, MAX(created_at) AS last_message_at
+         FROM message WHERE work_id = ?`,
+      )
+      .get(work.id);
+    const heartbeatParticipants = database
+      .prepare(
+        `SELECT identifier, last_heartbeat_at
+         FROM participant
+         WHERE work_id = ? AND last_heartbeat_at IS NOT NULL
+         ORDER BY identifier`,
+      )
+      .all(work.id);
+    const documentCounts = database
+      .prepare(
+        `SELECT COUNT(DISTINCT document.id) AS document_count,
+                COUNT(revision.id) AS revision_count
+         FROM document
+         LEFT JOIN revision ON revision.document_id = document.id
+         WHERE document.work_id = ?`,
+      )
+      .get(work.id);
+    const participantCount = Number(
+      database
+        .prepare("SELECT COUNT(*) AS count FROM participant WHERE work_id = ?")
+        .get(work.id).count,
+    );
+    return {
+      slug: work.slug,
+      title: work.title,
+      message_count: Number(messageActivity.message_count),
+      last_updated_at: messageActivity.last_message_at ?? work.created_at,
+      heartbeat_participants: heartbeatParticipants,
+      participant_count: participantCount,
+      document_count: Number(documentCounts.document_count),
+      revision_count: Number(documentCounts.revision_count),
+    };
+  }
+
+  function previewProjectDeletion(projectSlug) {
+    const project = projectBySlug(projectSlug);
+    const works = database
+      .prepare("SELECT * FROM work WHERE project_id = ? ORDER BY slug")
+      .all(project.id)
+      .map(workDeletionSummary);
+    const projectDocumentCounts = database
+      .prepare(
+        `SELECT COUNT(DISTINCT document.id) AS document_count,
+                COUNT(revision.id) AS revision_count
+         FROM document
+         LEFT JOIN revision ON revision.document_id = document.id
+         WHERE document.project_id = ?`,
+      )
+      .get(project.id);
+    const issueCounts = database
+      .prepare(
+        `SELECT COUNT(DISTINCT issue.id) AS issue_count,
+                COUNT(issue_comment.id) AS comment_count
+         FROM issue
+         LEFT JOIN issue_comment ON issue_comment.issue_id = issue.id
+         WHERE issue.project_id = ?`,
+      )
+      .get(project.id);
+    // origin_project is plain text, so issues filed elsewhere from this project
+    // survive the delete with an origin that no longer resolves. They are not
+    // deleted, but the owner must see them before confirming.
+    const foreignIssuesFromHere = database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM issue
+         WHERE origin_project = ? AND project_id <> ?`,
+      )
+      .get(projectSlug, project.id);
+    return {
+      target: { project: projectSlug },
+      totals: {
+        projects: 1,
+        works: works.length,
+        messages: works.reduce((total, work) => total + work.message_count, 0),
+        participants: works.reduce(
+          (total, work) => total + work.participant_count,
+          0,
+        ),
+        documents: Number(projectDocumentCounts.document_count),
+        revisions: Number(projectDocumentCounts.revision_count),
+        issues: Number(issueCounts.issue_count),
+        issue_comments: Number(issueCounts.comment_count),
+      },
+      retained: {
+        issues_in_other_projects_citing_this_origin: Number(
+          foreignIssuesFromHere.count,
+        ),
+      },
+      works,
+    };
+  }
+
+  function previewWorkDeletion(projectSlug, workSlug) {
+    const work = workBySlug(projectSlug, workSlug);
+    const summary = workDeletionSummary(work);
+    return {
+      target: { project: projectSlug, work: workSlug },
+      totals: {
+        projects: 0,
+        works: 1,
+        messages: summary.message_count,
+        participants: summary.participant_count,
+        documents: summary.document_count,
+        revisions: summary.revision_count,
+      },
+      works: [summary],
+    };
+  }
+
+  function requireNonemptyDeletionOverride(preview, deleteNonempty) {
+    assert(
+      preview.totals.messages === 0 || deleteNonempty === true,
+      409,
+      "nonempty_delete_requires_override",
+      "Target contains messages; pass the separate delete_nonempty override to delete it",
+      {
+        required_override: "delete_nonempty=true",
+        deletion_preview: preview,
+      },
+    );
+  }
+
+  function deleteProject(projectSlug, confirmation, deleteNonempty = false) {
     requireDeletionConfirmation(projectSlug, confirmation);
     return inTransaction(database, () => {
       const project = projectBySlug(projectSlug);
+      requireNonemptyDeletionOverride(
+        previewProjectDeletion(projectSlug),
+        deleteNonempty,
+      );
       const deleted = emptyDeletionCounts();
       const messageIds = `
         SELECT message.id
@@ -527,7 +1065,16 @@ export function createStore(database, options = {}) {
       const documentIds =
         "SELECT id FROM document WHERE project_id = ?";
       const workIds = "SELECT id FROM work WHERE project_id = ?";
+      const issueIds = "SELECT id FROM issue WHERE project_id = ?";
 
+      deleted.issue_comments = deletedRows(
+        `DELETE FROM issue_comment WHERE issue_id IN (${issueIds})`,
+        project.id,
+      );
+      deleted.issues = deletedRows(
+        "DELETE FROM issue WHERE project_id = ?",
+        project.id,
+      );
       deleted.message_recipients = deletedRows(
         `DELETE FROM message_to WHERE message_id IN (${messageIds})`,
         project.id,
@@ -579,10 +1126,19 @@ export function createStore(database, options = {}) {
     });
   }
 
-  function deleteWork(projectSlug, workSlug, confirmation) {
+  function deleteWork(
+    projectSlug,
+    workSlug,
+    confirmation,
+    deleteNonempty = false,
+  ) {
     requireDeletionConfirmation(workSlug, confirmation);
     return inTransaction(database, () => {
       const work = workBySlug(projectSlug, workSlug);
+      requireNonemptyDeletionOverride(
+        previewWorkDeletion(projectSlug, workSlug),
+        deleteNonempty,
+      );
       const deleted = emptyDeletionCounts();
       const messageIds = "SELECT id FROM message WHERE work_id = ?";
       const documentIds = "SELECT id FROM document WHERE work_id = ?";
@@ -716,8 +1272,12 @@ export function createStore(database, options = {}) {
                 present: participant?.present ?? false,
                 first_seen_at: participant?.first_seen_at ?? null,
                 last_heartbeat_at: participant?.last_heartbeat_at ?? null,
+                attendance_mode:
+                  participant?.attendance_mode ?? "self-driven",
                 ball: participant?.ball ?? { has_ball: false, reasons: [] },
                 abandoned: participant?.abandoned ?? false,
+                awaiting_activation:
+                  participant?.awaiting_activation ?? false,
               }
             : null,
         };
@@ -728,7 +1288,7 @@ export function createStore(database, options = {}) {
     const project = projectBySlug(projectSlug);
     return database
       .prepare(
-        `SELECT kind, slug, title, current_revision, created_at
+        `SELECT kind, slug, adr_number, title, current_revision, created_at
          FROM document WHERE project_id = ?
          ORDER BY CASE kind WHEN 'context' THEN 0 WHEN 'adr' THEN 1 ELSE 2 END,
                   adr_number, slug`,
@@ -765,6 +1325,7 @@ export function createStore(database, options = {}) {
       doc: documentIdentifier(document),
       kind: document.kind,
       slug: document.slug,
+      adr_number: document.adr_number,
       title: document.title,
       body: revision.body,
       revision: revision.revision,
@@ -822,19 +1383,52 @@ export function createStore(database, options = {}) {
         );
         slug = "context";
       } else if (input.kind === "adr") {
+        const explicitNumber =
+          input.adr_number === undefined || input.adr_number === null
+            ? null
+            : input.adr_number;
         assert(
-          input.slug === undefined,
+          explicitNumber === null ||
+            (Number.isInteger(explicitNumber) && explicitNumber > 0),
           400,
           "invalid_request",
-          "ADR slug is assigned by the server",
+          "adr_number must be a positive integer",
         );
         adrNumber =
+          explicitNumber ??
           database
             .prepare(
               "SELECT COALESCE(MAX(adr_number), 0) + 1 AS next FROM document WHERE project_id = ? AND kind = 'adr'",
             )
             .get(project.id).next;
-        slug = `${String(adrNumber).padStart(4, "0")}-${kebabCase(input.title)}`;
+        const numberPrefix = String(adrNumber).padStart(4, "0");
+        if (input.slug === undefined) {
+          slug = `${numberPrefix}-${kebabCase(input.title)}`;
+        } else {
+          assert(
+            explicitNumber !== null,
+            400,
+            "invalid_request",
+            "An explicit ADR slug requires adr_number",
+          );
+          slug = requireSlug(input.slug, "ADR slug");
+          assert(
+            slug.startsWith(`${numberPrefix}-`),
+            400,
+            "invalid_request",
+            `ADR slug must start with ${numberPrefix}-`,
+          );
+        }
+        assert(
+          !database
+            .prepare(
+              "SELECT 1 FROM document WHERE project_id = ? AND kind = 'adr' AND adr_number = ?",
+            )
+            .get(project.id, adrNumber),
+          409,
+          "adr_number_conflict",
+          `ADR number already exists: ${adrNumber}`,
+        );
       } else {
         slug = requireSlug(input.slug, "handoff slug");
         workId = workInProject(project.id, slug).id;
@@ -1039,6 +1633,10 @@ export function createStore(database, options = {}) {
       );
 
       touchParticipant(work.id, input.from, input.role, createdAt);
+      const attendanceMode = attendanceModeFromStatus(input);
+      if (attendanceMode !== undefined) {
+        setAttendanceMode(work.id, input.from, attendanceMode);
+      }
       const seq = database
         .prepare(
           "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM message WHERE work_id = ?",
@@ -1207,6 +1805,13 @@ export function createStore(database, options = {}) {
         last_heartbeat_at: participant.last_heartbeat_at,
         ball_reasons: participant.ball.reasons,
       }));
+    const awaitingActivation = participantStates(work.id, identifier)
+      .filter((participant) => participant.awaiting_activation)
+      .map((participant) => ({
+        identifier: participant.identifier,
+        last_heartbeat_at: participant.last_heartbeat_at,
+        ball_reasons: participant.ball.reasons,
+      }));
 
     return {
       messages: listMessages(projectSlug, workSlug, since),
@@ -1215,6 +1820,7 @@ export function createStore(database, options = {}) {
         ? "No participant has acted for 5 minutes and you do not hold the ball. Re-check the work state or ask who should act next."
         : null,
       abandoned,
+      awaiting_activation: awaitingActivation,
       stale_expectations: staleExpectations(work.id, identifier),
       heartbeat_at: heartbeatAt,
     };
@@ -1248,6 +1854,30 @@ export function createStore(database, options = {}) {
       work: row.work_slug,
       message: hydrateMessage(row),
     }));
+  }
+
+  function activationInbox() {
+    return database
+      .prepare(
+        `SELECT work.id, work.slug AS work_slug, project.slug AS project_slug
+         FROM work
+         JOIN project ON project.id = work.project_id
+         ORDER BY project.slug, work.slug`,
+      )
+      .all()
+      .flatMap((work) =>
+        participantStates(work.id)
+          .filter((participant) => participant.awaiting_activation)
+          .map((participant) => ({
+            project: work.project_slug,
+            work: work.work_slug,
+            identifier: participant.identifier,
+            role: participant.role,
+            attendance_mode: participant.attendance_mode,
+            last_heartbeat_at: participant.last_heartbeat_at,
+            ball_reasons: participant.ball.reasons,
+          })),
+      );
   }
 
   function getWork(projectSlug, workSlug) {
@@ -1787,21 +2417,29 @@ export function createStore(database, options = {}) {
   }
 
   return {
+    addIssueComment,
+    activationInbox,
     ballFor,
     closeQuestion,
+    closeIssue,
     createDocument,
+    createIssue,
     createProject,
     createWork,
+    deleteDocument,
     deleteParticipant,
     deleteProject,
     deleteWork,
     getDocument,
+    getIssue,
     getProject,
     getWork,
     health,
     inbox,
     importBundle,
     listDocuments,
+    listIssues,
+    listIssuesAcrossProjects,
     listMessages,
     listProjects,
     listRevisions,
@@ -1809,7 +2447,11 @@ export function createStore(database, options = {}) {
     participantStates,
     poll,
     postMessage,
+    previewProjectDeletion,
+    previewWorkDeletion,
     resolveWork,
+    reopenIssue,
+    setWorkImplementer,
     seedImportedMessage,
     updateDocument,
     _database: database,

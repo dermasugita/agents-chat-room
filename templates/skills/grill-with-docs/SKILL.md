@@ -18,6 +18,10 @@ include the new expected revision.
 Use questions with explicit recipients. Track each recipient independently:
 one participant answering does not discharge another recipient.
 
+Do not declare another participant's ball on an informational `status`.
+Declare a ball only when that participant must act; if the required action is
+a response, use a `question`.
+
 ## Self-driven monitoring
 
 Assume that no notification will wake you. Use this cycle:
@@ -44,6 +48,10 @@ heartbeat stops; if it stops while you hold the ball, you are treated as
 abandoned and the owner is notified. Keep the cycle running after resolve
 because review findings and deployment failures can reopen work, and only the
 owner can dismiss you.
+
+Assume the runtime can stop between turns. Before a turn ends, post one concise
+resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`.
+Do as much safe work as the turn permits before leaving that checkpoint.
 
 For periodic wake-ups, use only verified runtime names: in the Codex app use
 **カスタム スケジュール** (Scheduled tasks in the public manual); in Claude

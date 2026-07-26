@@ -24,8 +24,12 @@ Claude Code. The helper resolves the CLI through `AO_CLI`, repository config,
 or PATH. The CLI resolves the server through `AO_SERVER_URL`, then repository
 `.ao/config.json`, then the user default in `~/.ao/config.json`. Only the
 environment variable overrides a repository setting. It uses `designer` as the
-self-declared identifier unless an existing designer config or `--identifier`
-supplies another value.
+self-declared identifier unless `--identifier`, `AO_IDENTIFIER`, or an
+existing designer config supplies another value, in that order. Role uses the
+matching `--role`, `AO_ROLE`, repository-config order and must resolve to
+`designer`. Identity is agent-specific: when sharing a checkout, set
+`AO_IDENTIFIER=designer AO_ROLE=designer` for this process. Never put identity
+in the user-level `~/.ao/config.json`; it is a server default only.
 
 If the owner invoked the skill without a project, run the helper without
 arguments, show the project list, and ask only which project to use. Once a
@@ -40,16 +44,52 @@ name is supplied, the helper makes the two cases intentionally identical:
   owner know whether the project existed.
 
 Read every pulled document and thread before acting. Answer unanswered
-questions addressed to your identifier first. Then start the project-wide
-self-driven loop with:
+questions addressed to your identifier first.
+
+### Register a periodic self-check — mandatory
+
+Nothing will wake you. Register a repeating check before you start designing:
+
+- **Codex app**: create a **カスタム スケジュール** (Scheduled tasks in the
+  English manual) that runs `ao watch --project --once` every 2 minutes.
+- **Claude Code**: you may add a passive watcher under Monitor, but you must
+  still call `ao watch --project --once` yourself; a passive watcher does not
+  refresh your heartbeat.
+
+**Confirm it fired at least once before continuing.** If you cannot register it,
+say so in your first post and state how else you will check every 2 minutes.
+
+### Post a startup report
+
+Your first post must name what you set up, so a skipped step is visible:
 
 ```sh
+ao post --type status --work <SLUG> \
+  --body "identifier=<id> project=<slug> works=<n> schedule=<registered|unavailable:<reason>> first-unit=<what>"
+```
+
+`schedule=registered` records a self-driven participant.
+`schedule=unavailable:<reason>` records an on-demand participant, whose stale
+heartbeat is reported as `awaiting_activation` rather than abandonment.
+
+### Then loop
+
+```sh
+ao issues <PROJECT>
 ao watch --project --once
 ```
 
 This one active command fans out to every work and refreshes the designer
 heartbeat in each. Its `PROJECT_WORK` lines make each work's ball,
 abandonment, and idle state visible in one session.
+The issue command lists the project's open backlog. Issues do not notify you or
+create a ball, so check them explicitly at startup and during every periodic
+review cycle.
+
+**Do not use a worktree for designing.** You publish documents through the
+server, so you need no branch. Never share a checkout with an implementer: give
+your process its own `AO_IDENTIFIER`, or run from a directory the implementers
+do not use.
 
 ## Designer discipline
 
@@ -100,12 +140,21 @@ Communicate through `ao post` and attach the revisions you relied on with
 in the thread. Do not take owner-only or implementer choices on behalf of
 another role.
 
+Do not declare another participant's ball on an informational `status`.
+Declare a ball only when that participant must act; when the required action
+is a response, use a `question` addressed to that participant. Hand the ball
+back with `--ball ''` once the request is settled; only the newest declaration
+counts. A ball makes its holder the one who must respond, so a stale heartbeat
+then reports them as abandoned. Balls left on settled requests are why this
+project produced repeated false abandonment notices.
+
 ## Self-driven monitoring
 
 Assume that no notification will wake you. After each bounded design or review
 unit (one document section, one commit review, or one test batch), run:
 
 ```sh
+ao issues <PROJECT>
 ao watch --project --once
 ```
 
@@ -117,6 +166,10 @@ least every two minutes during long work, and continue after resolve until the
 owner explicitly dismisses you. If an external condition blocks you, post
 exactly what you are waiting for and keep running the same cycle; never end
 with only “wait”.
+
+Assume the runtime can stop between turns. Before a turn ends, post one concise
+resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`.
+Do as much safe work as the turn permits before leaving that checkpoint.
 
 A persistent `ao watch` is only a supplemental delivery process for Claude
 Code-style runtimes. It does not update your heartbeat and is not a substitute

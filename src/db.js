@@ -2,7 +2,44 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 4;
+
+const ISSUE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS issue (
+  id                INTEGER PRIMARY KEY,
+  project_id        INTEGER NOT NULL REFERENCES project(id),
+  number            INTEGER NOT NULL,
+  title             TEXT NOT NULL,
+  body              TEXT NOT NULL,
+  state             TEXT NOT NULL CHECK (state IN ('open','closed')),
+  origin_project    TEXT NOT NULL,
+  origin_identifier TEXT NOT NULL,
+  origin_role       TEXT NOT NULL CHECK (origin_role IN ('owner','designer','implementer')),
+  origin_work       TEXT,
+  created_at        TEXT NOT NULL,
+  closed_at         TEXT,
+  closed_by         TEXT,
+  close_reason      TEXT,
+  UNIQUE (project_id, number)
+);
+
+CREATE TABLE IF NOT EXISTS issue_comment (
+  id                INTEGER PRIMARY KEY,
+  issue_id          INTEGER NOT NULL REFERENCES issue(id),
+  seq               INTEGER NOT NULL,
+  body              TEXT NOT NULL,
+  origin_project    TEXT NOT NULL,
+  origin_identifier TEXT NOT NULL,
+  origin_role       TEXT NOT NULL CHECK (origin_role IN ('owner','designer','implementer')),
+  created_at        TEXT NOT NULL,
+  UNIQUE (issue_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_project_state_number
+  ON issue(project_id, state, number);
+CREATE INDEX IF NOT EXISTS idx_issue_comment_issue_seq
+  ON issue_comment(issue_id, seq);
+`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -70,6 +107,8 @@ CREATE TABLE IF NOT EXISTS participant (
   work_id           INTEGER NOT NULL REFERENCES work(id),
   identifier        TEXT NOT NULL,
   role              TEXT NOT NULL CHECK (role IN ('owner','designer','implementer')),
+  attendance_mode   TEXT NOT NULL DEFAULT 'self-driven'
+                    CHECK (attendance_mode IN ('self-driven','on-demand')),
   first_seen_at     TEXT NOT NULL,
   last_heartbeat_at TEXT,
   UNIQUE (work_id, identifier)
@@ -120,6 +159,7 @@ CREATE INDEX IF NOT EXISTS idx_message_work_seq ON message(work_id, seq);
 CREATE INDEX IF NOT EXISTS idx_message_reply ON message(work_id, reply_to_seq, from_identifier);
 CREATE INDEX IF NOT EXISTS idx_message_to_identifier ON message_to(identifier, message_id);
 CREATE INDEX IF NOT EXISTS idx_participant_work ON participant(work_id, identifier);
+${ISSUE_SCHEMA}
 `;
 
 export function createDatabase(path = ":memory:") {
@@ -136,13 +176,41 @@ export function createDatabase(path = ":memory:") {
   database.exec(SCHEMA);
 
   const current = database.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version;
-  if (current === null) {
-    database.prepare(
-      "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
-    ).run(SCHEMA_VERSION, new Date().toISOString());
-  } else if (current === 1) {
+  const recordVersion = (version) =>
+    database
+      .prepare("INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)")
+      .run(version, new Date().toISOString());
+  const addAttendanceMode = () => {
+    const columns = new Set(
+      database
+        .prepare("PRAGMA table_info(participant)")
+        .all()
+        .map(({ name }) => name),
+    );
+    if (!columns.has("attendance_mode")) {
+      database.exec(
+        `ALTER TABLE participant
+         ADD COLUMN attendance_mode TEXT NOT NULL DEFAULT 'self-driven'
+         CHECK (attendance_mode IN ('self-driven','on-demand'))`,
+      );
+    }
+  };
+  const migrate = (operation) => {
     database.exec("BEGIN IMMEDIATE");
     try {
+      operation();
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      database.close();
+      throw error;
+    }
+  };
+
+  if (current === null) {
+    recordVersion(SCHEMA_VERSION);
+  } else if (current === 1) {
+    migrate(() => {
       database.exec(
         "ALTER TABLE work ADD COLUMN expected_participant_identifier TEXT",
       );
@@ -150,15 +218,24 @@ export function createDatabase(path = ":memory:") {
         `ALTER TABLE work ADD COLUMN expected_participant_role TEXT
          CHECK (expected_participant_role IN ('owner','designer','implementer'))`,
       );
-      database.prepare(
-        "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
-      ).run(SCHEMA_VERSION, new Date().toISOString());
-      database.exec("COMMIT");
-    } catch (error) {
-      database.exec("ROLLBACK");
-      database.close();
-      throw error;
-    }
+      recordVersion(2);
+      database.exec(ISSUE_SCHEMA);
+      recordVersion(3);
+      addAttendanceMode();
+      recordVersion(4);
+    });
+  } else if (current === 2) {
+    migrate(() => {
+      database.exec(ISSUE_SCHEMA);
+      recordVersion(3);
+      addAttendanceMode();
+      recordVersion(4);
+    });
+  } else if (current === 3) {
+    migrate(() => {
+      addAttendanceMode();
+      recordVersion(4);
+    });
   } else if (current !== SCHEMA_VERSION) {
     database.close();
     throw new Error(
