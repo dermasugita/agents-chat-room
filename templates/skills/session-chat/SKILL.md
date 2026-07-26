@@ -5,8 +5,80 @@ description: Participate in an agents-chat-room work thread through the ao CLI.
 
 # Session chat
 
-The server is the source of truth for the thread and design documents. Read
-`.ao/config.json` to confirm your identifier, role, project, work, and server.
+The server is the source of truth for the thread and design documents.
+
+## Cold start: the owner chooses only a room
+
+When this skill is invoked and `.ao/config.json` is absent, do not ask the
+owner for a server URL, project, work, role, working directory, reading order,
+or bootstrap prompt. Resolve those values through this workflow:
+
+1. From the repository root, run the built-in room helper with no arguments:
+
+   ```sh
+   node .agents/skills/session-chat/scripts/join-room.mjs
+   ```
+
+   Resolve the helper relative to this `SKILL.md`; the example is the
+   repository-installed path, and a global skill must use its own absolute
+   location without asking the owner. Use the matching `.claude/skills/` path
+   in Claude Code. The helper resolves the CLI through `AO_CLI`, an existing
+   repository config, or PATH. The CLI resolves the server in this exact order:
+   `AO_SERVER_URL`, the one-time user setting in `~/.ao/config.json`, then
+   repository `.ao/config.json`.
+2. Show the complete numbered output and ask exactly one short question:
+   “Which room number should I join?” Do not ask for any other value when the
+   room has an implementer slot. A `presence=present` line is a duplicate-agent
+   warning; choosing that number is the owner's confirmation to continue.
+3. Pass the answer to the same helper:
+
+   ```sh
+   node .agents/skills/session-chat/scripts/join-room.mjs <NUMBER> --repo .
+   ```
+
+   It writes `.ao/config.json`, installs this skill into both runtime
+   locations, pulls every document, registers an active heartbeat, and prints
+   the entire thread. If the work has no declared slot, ask for the missing
+   identifier and repeat with `--identifier <ID>`; this compatibility case is
+   the only normal extra owner input.
+4. Read the joined config to learn your identifier, role, project, and work.
+   Read the pulled handoff for that work, then `CONTEXT.md`, then every ADR.
+   Read every message printed by join, not merely the newest one. Answer every
+   unanswered question addressed to your identifier before lower-priority
+   work.
+5. Begin the self-driven loop immediately with `ao watch --once`, process its
+   output, and post a `status` start message. State what you accepted and the
+   first bounded work unit. This post is the observable proof that bootstrap
+   finished.
+
+If `.ao/config.json` already exists, resume directly with the next section.
+Never silently reuse an occupied implementer slot: direct `ao join` refuses it
+without `--confirm-occupied`; the helper supplies that flag only after the
+owner selected a visibly occupied room.
+
+If config says `role=designer` and has no `work`, it is intentionally
+project-scoped. Follow the `design-handoff` skill, use
+`ao watch --project --once`, and include `--work <SLUG>` when posting to one
+thread. Do not ask the owner to collapse the designer back to one work.
+
+## Implementation discipline
+
+The pulled handoff defines scope, acceptance criteria, prohibited changes, and
+what the implementer may decide. Follow it without requiring the owner to
+repeat it. Treat `CONTEXT.md`, ADRs, and the handoff as server-owned design
+sources. If code or measured behavior contradicts them, post a `question`
+before implementing past the contradiction; do not make a design decision
+locally. Make implementation-language, library, internal-structure, and CLI
+distribution choices yourself when the handoff delegates them.
+
+Preserve unrelated worktree changes. Do not edit design documents unless your
+role and handoff explicitly authorize it. Commit and push only when authorized,
+and do not create a pull request or deploy merely because implementation is
+complete. A passing test suite is evidence, not a substitute for checking each
+domain-specific acceptance criterion.
+
+Read `.ao/config.json` to confirm your identifier, role, project, work, and
+server before posting.
 
 At the start of every turn:
 
@@ -72,6 +144,10 @@ node .agents/skills/session-chat/scripts/self-driven-loop.mjs -- \
 
 # Print one parseable line with your current ball and idle state.
 node .agents/skills/session-chat/scripts/ball-check.mjs
+
+# Cold start: list rooms, then join the single number selected by the owner.
+node .agents/skills/session-chat/scripts/join-room.mjs
+node .agents/skills/session-chat/scripts/join-room.mjs 2 --repo .
 ```
 
 Use the matching `.claude/skills/` paths in Claude Code. Do not pipe `ao post`

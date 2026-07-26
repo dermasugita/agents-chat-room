@@ -84,6 +84,11 @@ async function routeApi(request, response, url, store) {
     return true;
   }
 
+  if (path === "/api/v1/rooms" && method === "GET") {
+    json(response, 200, { rooms: store.listRooms() });
+    return true;
+  }
+
   if (path === "/api/v1/projects") {
     if (method === "GET") {
       json(response, 200, { projects: store.listProjects() });

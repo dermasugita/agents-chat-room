@@ -11,6 +11,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,19 +30,25 @@ const CLI_ENTRYPOINT = resolve(
 const HELP = `agents-chat-room CLI
 
 Usage:
+  ao configure --server URL
+  ao projects [--json]
+  ao design <PROJECT> [--repo PATH] [--identifier ID]
+  ao rooms [--json] [--repo PATH]
+  ao join <NUMBER|PROJECT/WORK> [--repo PATH] [--identifier ID] [--confirm-occupied]
   ao inject <repo> --server URL --identifier ID --role ROLE [--project SLUG] [--work SLUG] [--work-title TITLE]
   ao pull [DOC] [--force] [--repo PATH]
   ao push <DOC> [--note TEXT] [--repo PATH]
   ao post --type TYPE --body TEXT [--to ID[,ID]] [--reply-to SEQ] [--ball ID[,ID]]
   ao messages [--since SEQ]
-  ao watch [--since SEQ] [--interval SECONDS] [--once]
+  ao watch [--project] [--since SEQ] [--interval SECONDS] [--once]
   ao close <SEQ>
   ao resolve
-  ao create-work <SLUG> --title TITLE
+  ao create-work <SLUG> --title TITLE [--implementer ID]
   ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
   ao import <repo> [--yes] [--project SLUG] [--name NAME]
 
-Configuration is read from .ao/config.json. AO_SERVER_URL can override server_url.
+Server resolution order is AO_SERVER_URL, ~/.ao/config.json, then the
+repository .ao/config.json. Run ao configure once to write the user setting.
 `;
 
 class CliError extends Error {
@@ -148,7 +155,7 @@ function hash(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-function findRepository(start = process.cwd()) {
+function findRepositoryOptional(start = process.cwd()) {
   let current = resolve(start);
   if (existsSync(current) && !statSync(current).isDirectory()) {
     current = dirname(current);
@@ -159,12 +166,75 @@ function findRepository(start = process.cwd()) {
     }
     const parent = dirname(current);
     if (parent === current) {
-      throw new CliError(
-        "No .ao/config.json found. Run `ao inject <repo>` or pass --repo.",
-      );
+      return null;
     }
     current = parent;
   }
+}
+
+function findRepository(start = process.cwd()) {
+  const repository = findRepositoryOptional(start);
+  if (!repository) {
+    throw new CliError(
+      "No .ao/config.json found. Run `ao join` or `ao inject <repo>`, or pass --repo.",
+    );
+  }
+  return repository;
+}
+
+function userConfigPath(options = {}) {
+  const environment = options.environment ?? process.env;
+  const homeDirectory =
+    options.homeDirectory ??
+    (typeof environment.HOME === "string" && environment.HOME.trim()
+      ? resolve(environment.HOME)
+      : homedir());
+  return join(homeDirectory, ".ao", "config.json");
+}
+
+function validServerUrl(value) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function resolveServerUrl(parsed, options = {}) {
+  const environment = options.environment ?? process.env;
+  const fromEnvironment = validServerUrl(environment.AO_SERVER_URL);
+  if (fromEnvironment) {
+    return { server_url: fromEnvironment, source: "AO_SERVER_URL" };
+  }
+
+  const userPath = userConfigPath({
+    environment,
+    homeDirectory: options.homeDirectory,
+  });
+  const userConfig = readJson(userPath);
+  const fromUser = validServerUrl(userConfig?.server_url);
+  if (fromUser) {
+    return { server_url: fromUser, source: userPath };
+  }
+
+  const requestedRepository = option(parsed, "repo");
+  const repository = requestedRepository
+    ? resolve(String(requestedRepository))
+    : findRepositoryOptional(options.cwd ?? process.cwd());
+  const repositoryPath = repository
+    ? join(repository, ".ao", "config.json")
+    : null;
+  const repositoryConfig = repositoryPath
+    ? readJson(repositoryPath)
+    : undefined;
+  const fromRepository = validServerUrl(repositoryConfig?.server_url);
+  if (fromRepository) {
+    return { server_url: fromRepository, source: repositoryPath };
+  }
+
+  throw new CliError(
+    `Cannot resolve the server URL. AO_SERVER_URL is not set; ${userPath} has no server_url; ${
+      repositoryPath ?? "no repository .ao/config.json was found"
+    }. Run \`ao configure --server URL\` once.`,
+  );
 }
 
 function loadContext(parsed) {
@@ -174,7 +244,7 @@ function loadContext(parsed) {
   if (!config) {
     throw new CliError(`Missing configuration: ${configPath}`);
   }
-  config.server_url = process.env.AO_SERVER_URL ?? config.server_url;
+  config.server_url = resolveServerUrl(parsed).server_url;
   if (!config.server_url || !config.project || !config.identifier || !config.role) {
     throw new CliError(`${configPath} is missing required fields`);
   }
@@ -257,6 +327,362 @@ async function api(config, method, path, body = undefined) {
     throw new ApiError(response.status, responseBody);
   }
   return responseBody;
+}
+
+function configure(parsed) {
+  const path = userConfigPath();
+  const existing = readJson(path, {});
+  const serverUrl = requireOption(parsed, "server");
+  writeJson(path, { ...existing, server_url: serverUrl });
+  return { path, server_url: serverUrl };
+}
+
+async function fetchRooms(parsed) {
+  const resolvedServer = resolveServerUrl(parsed);
+  const result = await api(resolvedServer, "GET", "/rooms");
+  return {
+    rooms: result.rooms,
+    server: resolvedServer,
+  };
+}
+
+async function fetchProjects(parsed) {
+  const resolvedServer = resolveServerUrl(parsed);
+  const result = await api(resolvedServer, "GET", "/projects");
+  return {
+    projects: result.projects,
+    server: resolvedServer,
+  };
+}
+
+async function projectsCommand(parsed) {
+  const listing = await fetchProjects(parsed);
+  if (hasOption(parsed, "json")) {
+    print(listing);
+    return;
+  }
+  if (listing.projects.length === 0) {
+    console.log("No projects exist yet. Provide a project name to create one.");
+    return;
+  }
+  console.log("Available projects:");
+  listing.projects.forEach((project, index) => {
+    console.log(
+      `${index + 1}. ${project.slug}  ${project.name}  works=${project.work_count} documents=${project.document_count}`,
+    );
+  });
+}
+
+function projectSlug(value) {
+  const normalized = String(value)
+    .normalize("NFKD")
+    .toLowerCase()
+    .replace(/['’]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return normalized || `project-${hash(String(value)).slice(0, 8)}`;
+}
+
+async function designProject(parsed) {
+  const requested = parsed.positional[1];
+  if (!requested) {
+    await projectsCommand(parsed);
+    return null;
+  }
+  const repository = resolve(String(option(parsed, "repo", process.cwd())));
+  if (!existsSync(repository) || !statSync(repository).isDirectory()) {
+    throw new CliError(`Repository directory not found: ${repository}`);
+  }
+  const listing = await fetchProjects(parsed);
+  const requestedText = String(requested).trim();
+  if (!requestedText) {
+    throw new CliError("design requires a non-empty project name");
+  }
+  let project = listing.projects.find(
+    (candidate) =>
+      candidate.slug === requestedText ||
+      candidate.name.toLowerCase() === requestedText.toLowerCase(),
+  );
+  let created = false;
+  if (!project) {
+    const slug = projectSlug(requestedText);
+    try {
+      project = await api(listing.server, "POST", "/projects", {
+        slug,
+        name: requestedText,
+      });
+      created = true;
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 409) {
+        throw error;
+      }
+      project = await api(
+        listing.server,
+        "GET",
+        `/projects/${apiPath(slug)}`,
+      );
+    }
+  }
+  const projectDetails = await api(
+    listing.server,
+    "GET",
+    `/projects/${apiPath(project.slug)}`,
+  );
+  const existingConfig = readJson(join(repository, ".ao", "config.json"));
+  const identifier = String(
+    hasOption(parsed, "identifier")
+      ? requireOption(parsed, "identifier")
+      : existingConfig?.role === "designer"
+        ? existingConfig.identifier
+        : "designer",
+  ).trim();
+  if (!identifier) {
+    throw new CliError("--identifier must be non-empty");
+  }
+  const config = {
+    server_url: listing.server.server_url,
+    project: project.slug,
+    identifier,
+    role: "designer",
+    cli: {
+      command: process.execPath,
+      args: [CLI_ENTRYPOINT],
+    },
+  };
+  mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
+  writeJson(join(repository, ".ao", "config.json"), config);
+  const context = {
+    config,
+    configPath: join(repository, ".ao", "config.json"),
+    repository,
+    statePath: join(repository, ".ao", "state.json"),
+  };
+  const skills = installSkills(repository);
+  ensureIgnored(repository);
+  const documents = await pullDocuments(
+    context,
+    undefined,
+    hasOption(parsed, "force"),
+  );
+  const threads = await Promise.all(
+    projectDetails.works.map(async (work) => ({
+      work: work.slug,
+      result: await pollWork(context, work.slug, {
+        heartbeat: true,
+        since: 0,
+      }),
+    })),
+  );
+  const state = readJson(context.statePath, { documents: {} });
+  state.project_messages ??= {};
+  for (const thread of threads) {
+    state.project_messages[thread.work] =
+      thread.result.messages.at(-1)?.seq ?? 0;
+  }
+  writeJson(context.statePath, state);
+  return {
+    created,
+    project: {
+      slug: project.slug,
+      name: project.name,
+    },
+    config: {
+      ...config,
+      server_source: listing.server.source,
+    },
+    documents: documents.map(({ doc, revision }) => ({
+      doc,
+      path: relative(repository, documentPath(repository, doc)),
+      revision,
+    })),
+    threads: threads.map(({ work, result }) => ({
+      work,
+      messages: result.messages,
+      your_ball: result.your_ball,
+      idle_nudge: result.idle_nudge,
+      abandoned: result.abandoned,
+      stale_expectations: result.stale_expectations,
+      heartbeat_at: result.heartbeat_at,
+    })),
+    skills,
+    ...(created
+      ? {
+          skeleton_grill: {
+            required: true,
+            first_branches: [
+              "Who is the user and what outcome must change?",
+              "What is in scope and explicitly out of scope?",
+              "Which terms and invariants belong in CONTEXT?",
+              "Which alternatives and tradeoffs require an ADR?",
+              "What evidence will make the first handoff acceptable?",
+            ],
+          },
+        }
+      : {}),
+    next: created
+      ? [
+          "Begin the skeleton grill immediately.",
+          "Create server documents only as decisions crystallize.",
+        ]
+      : [
+          "Read every pulled document and every work thread.",
+          "Answer unanswered questions addressed to your identifier first.",
+          "Run ao watch --project --once to begin the self-driven loop.",
+        ],
+  };
+}
+
+function roomLabel(room, index) {
+  const expected = room.expected_participant
+    ? `${room.expected_participant.identifier} (${room.expected_participant.role})`
+    : "undeclared";
+  const presence = room.presence?.present ? "present" : "absent";
+  const heartbeat = room.presence?.last_heartbeat_at ?? "none";
+  const ball = room.presence?.ball?.has_ball ?? false;
+  const abandoned = room.presence?.abandoned ?? false;
+  return `${index + 1}. ${room.project.slug} / ${room.work.slug}  ${room.work.title}  slot=${expected} presence=${presence} heartbeat=${heartbeat} ball=${ball} abandoned=${abandoned} state=${room.work.state}`;
+}
+
+async function roomsCommand(parsed) {
+  const listing = await fetchRooms(parsed);
+  if (hasOption(parsed, "json")) {
+    print(listing);
+    return;
+  }
+  if (listing.rooms.length === 0) {
+    console.log("No chat rooms are available.");
+    return;
+  }
+  console.log("Available chat rooms:");
+  listing.rooms.forEach((room, index) => console.log(roomLabel(room, index)));
+  console.log(
+    "Choose one room number. Choosing a present room confirms that you saw the duplicate-participant warning.",
+  );
+}
+
+function selectRoom(rooms, selection) {
+  if (/^\d+$/.test(selection)) {
+    const index = Number(selection) - 1;
+    if (index < 0 || index >= rooms.length) {
+      throw new CliError(
+        `Room number ${selection} is out of range; choose 1-${rooms.length}`,
+        2,
+      );
+    }
+    return rooms[index];
+  }
+  const separator = selection.indexOf("/");
+  if (separator > 0) {
+    const project = selection.slice(0, separator);
+    const work = selection.slice(separator + 1);
+    const room = rooms.find(
+      (candidate) =>
+        candidate.project.slug === project && candidate.work.slug === work,
+    );
+    if (room) {
+      return room;
+    }
+  }
+  throw new CliError(
+    `Unknown room ${selection}; use its list number or PROJECT/WORK`,
+    2,
+  );
+}
+
+async function joinRoom(parsed) {
+  const selection = parsed.positional[1];
+  if (!selection) {
+    throw new CliError("join requires a room number or PROJECT/WORK");
+  }
+  const repository = resolve(String(option(parsed, "repo", process.cwd())));
+  if (!existsSync(repository) || !statSync(repository).isDirectory()) {
+    throw new CliError(`Repository directory not found: ${repository}`);
+  }
+
+  const listing = await fetchRooms(parsed);
+  const room = selectRoom(listing.rooms, String(selection));
+  const expected = room.expected_participant;
+  const identifierValue = hasOption(parsed, "identifier")
+    ? requireOption(parsed, "identifier")
+    : expected?.identifier;
+  if (
+    identifierValue === undefined ||
+    identifierValue === true ||
+    String(identifierValue).trim() === ""
+  ) {
+    throw new CliError(
+      `Room ${room.project.slug}/${room.work.slug} has no implementer slot. Ask the owner for an identifier, then repeat with --identifier ID.`,
+      2,
+    );
+  }
+  const identifier = String(identifierValue).trim();
+  const role = String(option(parsed, "role", expected?.role ?? "implementer"));
+  if (!["owner", "designer", "implementer"].includes(role)) {
+    throw new CliError("--role must be owner, designer, or implementer");
+  }
+  const occupyingExpectedSlot =
+    expected?.identifier === identifier && room.presence?.present;
+  if (occupyingExpectedSlot && !hasOption(parsed, "confirm-occupied")) {
+    throw new CliError(
+      `WARNING: ${identifier} is already present in ${room.project.slug}/${room.work.slug} (heartbeat ${room.presence.last_heartbeat_at}). Two processes using one identifier corrupt heartbeat and abandonment state. Confirm with the owner, then repeat with --confirm-occupied.`,
+      2,
+    );
+  }
+
+  const config = {
+    server_url: listing.server.server_url,
+    project: room.project.slug,
+    work: room.work.slug,
+    identifier,
+    role,
+    cli: {
+      command: process.execPath,
+      args: [CLI_ENTRYPOINT],
+    },
+  };
+  mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
+  writeJson(join(repository, ".ao", "config.json"), config);
+  const context = {
+    config,
+    configPath: join(repository, ".ao", "config.json"),
+    repository,
+    statePath: join(repository, ".ao", "state.json"),
+  };
+  const skills = installSkills(repository);
+  ensureIgnored(repository);
+  const documents = await pullDocuments(
+    context,
+    undefined,
+    hasOption(parsed, "force"),
+  );
+  const thread = await pollWork(context, room.work.slug, {
+    heartbeat: true,
+    since: 0,
+  });
+  return {
+    room,
+    config: {
+      ...config,
+      server_source: listing.server.source,
+    },
+    documents: documents.map(({ doc, revision }) => ({
+      doc,
+      path: relative(repository, documentPath(repository, doc)),
+      revision,
+    })),
+    messages: thread.messages,
+    your_ball: thread.your_ball,
+    idle_nudge: thread.idle_nudge,
+    abandoned: thread.abandoned,
+    stale_expectations: thread.stale_expectations,
+    skills,
+    next: [
+      "Read every pulled document and message in this output.",
+      "Answer unanswered questions addressed to your identifier first.",
+      "Run ao watch --once to begin the self-driven loop.",
+      "Post a status start message to the thread.",
+    ],
+  };
 }
 
 function documentPath(repository, identifier) {
@@ -688,8 +1114,16 @@ async function inject(parsed) {
   const selectedWorkTitle = hasOption(parsed, "work-title")
     ? requireOption(parsed, "work-title")
     : undefined;
+  let serverUrl = option(parsed, "server");
+  if (serverUrl === undefined) {
+    try {
+      serverUrl = resolveServerUrl(parsed).server_url;
+    } catch {
+      serverUrl = "http://127.0.0.1:7331";
+    }
+  }
   const config = {
-    server_url: String(option(parsed, "server", "http://127.0.0.1:7331")),
+    server_url: String(serverUrl),
     project: String(project),
     identifier: requireOption(parsed, "identifier"),
     role: requireOption(parsed, "role"),
@@ -816,25 +1250,27 @@ function messageLine(message) {
   return `MESSAGE seq=${message.seq} type=${message.type} from=${message.from} to=${message.to.join(",")} body=${body}`;
 }
 
-function emitPoll(result) {
+function emitPoll(result, prefix = "") {
   for (const message of result.messages) {
-    console.log(messageLine(message));
+    console.log(`${prefix}${messageLine(message)}`);
   }
   if (result.idle_nudge) {
-    console.log(`IDLE ${result.idle_nudge}`);
+    console.log(`${prefix}IDLE ${result.idle_nudge}`);
   }
   for (const participant of result.abandoned) {
     console.log(
-      `ABANDONED identifier=${participant.identifier} last_heartbeat_at=${participant.last_heartbeat_at ?? "never"} reasons=${JSON.stringify(participant.ball_reasons)}`,
+      `${prefix}ABANDONED identifier=${participant.identifier} last_heartbeat_at=${participant.last_heartbeat_at ?? "never"} reasons=${JSON.stringify(participant.ball_reasons)}`,
     );
   }
   for (const expectation of result.stale_expectations) {
     console.log(
-      `STALE doc=${expectation.doc} you_have=${expectation.you_have} current=${expectation.current}`,
+      `${prefix}STALE doc=${expectation.doc} you_have=${expectation.you_have} current=${expectation.current}`,
     );
   }
   if (result.your_ball.has_ball) {
-    console.log(`BALL reasons=${JSON.stringify(result.your_ball.reasons)}`);
+    console.log(
+      `${prefix}BALL reasons=${JSON.stringify(result.your_ball.reasons)}`,
+    );
   }
 }
 
@@ -877,6 +1313,79 @@ async function watch(context, parsed) {
   }
 }
 
+async function watchProject(context, parsed) {
+  const once = hasOption(parsed, "once");
+  const interval = Number(option(parsed, "interval", 10)) * 1_000;
+  if (!Number.isFinite(interval) || interval < 10) {
+    throw new CliError("--interval must be at least 0.01 seconds");
+  }
+  const explicitSince = option(parsed, "since");
+  if (
+    explicitSince !== undefined &&
+    (!Number.isInteger(Number(explicitSince)) || Number(explicitSince) < 0)
+  ) {
+    throw new CliError("--since must be a non-negative integer");
+  }
+  let failures = 0;
+  while (true) {
+    try {
+      const project = await api(
+        context.config,
+        "GET",
+        `/projects/${apiPath(context.config.project)}`,
+      );
+      const state = readJson(context.statePath, { documents: {} });
+      state.project_messages ??= {};
+      const results = await Promise.all(
+        project.works.map(async (work) => {
+          const since =
+            explicitSince === undefined
+              ? state.project_messages[work.slug] ?? 0
+              : Number(explicitSince);
+          return {
+            work,
+            result: await pollWork(context, work.slug, {
+              heartbeat: once,
+              since,
+            }),
+          };
+        }),
+      );
+      if (results.length === 0) {
+        console.log(
+          `PROJECT project=${context.config.project} works=0 skeleton_grill=true`,
+        );
+      }
+      for (const { work, result } of results) {
+        console.log(
+          `PROJECT_WORK project=${context.config.project} work=${work.slug} heartbeat=${result.heartbeat_at ?? "none"} ball=${result.your_ball.has_ball} idle=${result.idle_nudge !== null} abandoned=${result.abandoned.length}`,
+        );
+        emitPoll(
+          result,
+          `WORK project=${context.config.project} work=${work.slug} `,
+        );
+        if (result.messages.length > 0 && explicitSince === undefined) {
+          state.project_messages[work.slug] = result.messages.at(-1).seq;
+        }
+      }
+      writeJson(context.statePath, state);
+      failures = 0;
+    } catch (error) {
+      failures += 1;
+      console.error(
+        `ERROR project watch failure=${failures} ${error.displayMessage ?? error.message}`,
+      );
+      if (once) {
+        throw error;
+      }
+    }
+    if (once) {
+      return;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, interval));
+  }
+}
+
 function print(value) {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
@@ -891,6 +1400,29 @@ export async function main(argv) {
 
   if (command === "inject") {
     print(await inject(parsed));
+    return;
+  }
+  if (command === "configure") {
+    print(configure(parsed));
+    return;
+  }
+  if (command === "projects") {
+    await projectsCommand(parsed);
+    return;
+  }
+  if (command === "design") {
+    const result = await designProject(parsed);
+    if (result !== null) {
+      print(result);
+    }
+    return;
+  }
+  if (command === "rooms") {
+    await roomsCommand(parsed);
+    return;
+  }
+  if (command === "join") {
+    print(await joinRoom(parsed));
     return;
   }
 
@@ -932,7 +1464,11 @@ export async function main(argv) {
     return;
   }
   if (command === "watch") {
-    await watch(context, parsed);
+    if (hasOption(parsed, "project")) {
+      await watchProject(context, parsed);
+    } else {
+      await watch(context, parsed);
+    }
     return;
   }
   if (command === "close") {
@@ -977,7 +1513,13 @@ export async function main(argv) {
         context.config,
         "POST",
         `/projects/${apiPath(context.config.project)}/works`,
-        { slug, title: requireOption(parsed, "title") },
+        {
+          slug,
+          title: requireOption(parsed, "title"),
+          ...(hasOption(parsed, "implementer")
+            ? { implementer: requireOption(parsed, "implementer") }
+            : {}),
+        },
       ),
     );
     return;
@@ -1017,5 +1559,9 @@ export const cliInternals = {
   documentPath,
   hash,
   parseArguments,
+  projectSlug,
+  resolveServerUrl,
+  selectRoom,
   stripCopyHeader,
+  userConfigPath,
 };

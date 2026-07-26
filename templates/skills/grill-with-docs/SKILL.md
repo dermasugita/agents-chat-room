@@ -23,26 +23,27 @@ one participant answering does not discharge another recipient.
 Assume that no notification will wake you. Use this cycle:
 
 1. Stress-test one bounded branch of the design.
-2. Run `ao watch --once`.
-3. Read every event and inspect `your_ball`; if you hold it, resolve that work
-   instead of waiting.
+2. Run `ao watch --project --once`.
+3. Read every work-prefixed event and inspect each work's ball; if you hold one,
+   resolve that work instead of waiting.
 4. Repeat, at least every two minutes during long work or after each document
    section and test batch.
 
 This is the copyable check between work units:
 
 ```sh
-ao watch --once
+ao watch --project --once
 ```
 
 If you must wait for an external fact, post the exact condition first and keep
 running this cycle; never end with only “wait”. A persistent `ao watch` is only
 a supplemental delivery process for Claude Code-style runtimes. It does not
 update your heartbeat and cannot replace active `--once` checks. Unless you
-actively run `ao watch --once` or another active command, your heartbeat stops;
-if it stops while you hold the ball, you are treated as abandoned and the
-owner is notified. Keep the cycle running after resolve because review findings
-and deployment failures can reopen work, and only the owner can dismiss you.
+actively run `ao watch --project --once` or another active command, your
+heartbeat stops; if it stops while you hold the ball, you are treated as
+abandoned and the owner is notified. Keep the cycle running after resolve
+because review findings and deployment failures can reopen work, and only the
+owner can dismiss you.
 
 For periodic wake-ups, use only verified runtime names: in the Codex app use
 **カスタム スケジュール** (Scheduled tasks in the public manual); in Claude

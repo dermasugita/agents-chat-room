@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -18,12 +18,21 @@ CREATE TABLE IF NOT EXISTS project (
 );
 
 CREATE TABLE IF NOT EXISTS work (
-  id          INTEGER PRIMARY KEY,
-  project_id  INTEGER NOT NULL REFERENCES project(id),
-  slug        TEXT NOT NULL,
-  title       TEXT NOT NULL,
-  state       TEXT NOT NULL CHECK (state IN ('open','resolved')),
-  created_at  TEXT NOT NULL,
+  id                              INTEGER PRIMARY KEY,
+  project_id                      INTEGER NOT NULL REFERENCES project(id),
+  slug                            TEXT NOT NULL,
+  title                           TEXT NOT NULL,
+  state                           TEXT NOT NULL CHECK (state IN ('open','resolved')),
+  expected_participant_identifier TEXT,
+  expected_participant_role       TEXT CHECK (
+    expected_participant_role IN ('owner','designer','implementer')
+  ),
+  created_at                      TEXT NOT NULL,
+  CHECK (
+    (expected_participant_identifier IS NULL AND expected_participant_role IS NULL)
+    OR
+    (expected_participant_identifier IS NOT NULL AND expected_participant_role IS NOT NULL)
+  ),
   UNIQUE (project_id, slug)
 );
 
@@ -131,6 +140,25 @@ export function createDatabase(path = ":memory:") {
     database.prepare(
       "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
     ).run(SCHEMA_VERSION, new Date().toISOString());
+  } else if (current === 1) {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(
+        "ALTER TABLE work ADD COLUMN expected_participant_identifier TEXT",
+      );
+      database.exec(
+        `ALTER TABLE work ADD COLUMN expected_participant_role TEXT
+         CHECK (expected_participant_role IN ('owner','designer','implementer'))`,
+      );
+      database.prepare(
+        "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
+      ).run(SCHEMA_VERSION, new Date().toISOString());
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      database.close();
+      throw error;
+    }
   } else if (current !== SCHEMA_VERSION) {
     database.close();
     throw new Error(

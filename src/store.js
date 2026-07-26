@@ -347,10 +347,35 @@ export function createStore(database, options = {}) {
           role: participant.role,
           first_seen_at: participant.first_seen_at,
           last_heartbeat_at: participant.last_heartbeat_at,
+          present:
+            participant.last_heartbeat_at !== null &&
+            new Date(participant.last_heartbeat_at).getTime() >= cutoff,
           ball,
           abandoned,
         };
       });
+  }
+
+  function expectedParticipant(work) {
+    if (!work.expected_participant_identifier) {
+      return null;
+    }
+    return {
+      identifier: work.expected_participant_identifier,
+      role: work.expected_participant_role,
+    };
+  }
+
+  function serializeWork(work) {
+    const {
+      expected_participant_identifier: _expectedIdentifier,
+      expected_participant_role: _expectedRole,
+      ...serialized
+    } = work;
+    return {
+      ...serialized,
+      expected_participant: expectedParticipant(work),
+    };
   }
 
   function health() {
@@ -396,10 +421,12 @@ export function createStore(database, options = {}) {
     const project = projectBySlug(slug);
     const works = database
       .prepare(
-        `SELECT slug, title, state, created_at
+        `SELECT slug, title, state, expected_participant_identifier,
+                expected_participant_role, created_at
          FROM work WHERE project_id = ? ORDER BY slug`,
       )
-      .all(project.id);
+      .all(project.id)
+      .map(serializeWork);
     const documents = listDocuments(slug);
     return { ...project, works, documents };
   }
@@ -413,6 +440,16 @@ export function createStore(database, options = {}) {
       "invalid_request",
       "title is required",
     );
+    const implementer =
+      input?.implementer === undefined || input.implementer === null
+        ? null
+        : String(input.implementer).trim();
+    assert(
+      implementer === null || implementer.length > 0,
+      400,
+      "invalid_request",
+      "implementer must be a non-empty identifier",
+    );
     if (
       database
         .prepare("SELECT 1 FROM work WHERE project_id = ? AND slug = ?")
@@ -422,17 +459,70 @@ export function createStore(database, options = {}) {
     }
     const result = database
       .prepare(
-        `INSERT INTO work(project_id, slug, title, state, created_at)
-         VALUES (?, ?, ?, 'open', ?)`,
+        `INSERT INTO work(
+           project_id, slug, title, state,
+           expected_participant_identifier, expected_participant_role, created_at
+         )
+         VALUES (?, ?, ?, 'open', ?, ?, ?)`,
       )
-      .run(project.id, slug, input.title.trim(), now());
-    return database.prepare("SELECT * FROM work WHERE id = ?").get(result.lastInsertRowid);
+      .run(
+        project.id,
+        slug,
+        input.title.trim(),
+        implementer,
+        implementer === null ? null : "implementer",
+        now(),
+      );
+    return serializeWork(
+      database.prepare("SELECT * FROM work WHERE id = ?").get(result.lastInsertRowid),
+    );
   }
 
   function resolveWork(projectSlug, workSlug) {
     const work = workBySlug(projectSlug, workSlug);
     database.prepare("UPDATE work SET state = 'resolved' WHERE id = ?").run(work.id);
-    return { ...work, state: "resolved" };
+    return serializeWork({ ...work, state: "resolved" });
+  }
+
+  function listRooms() {
+    return database
+      .prepare(
+        `SELECT work.*, project.slug AS project_slug, project.name AS project_name
+         FROM work
+         JOIN project ON project.id = work.project_id
+         ORDER BY project.slug, work.slug`,
+      )
+      .all()
+      .map((work) => {
+        const expected = expectedParticipant(work);
+        const participant = expected
+          ? participantStates(work.id).find(
+              ({ identifier }) => identifier === expected.identifier,
+            )
+          : undefined;
+        return {
+          project: {
+            slug: work.project_slug,
+            name: work.project_name,
+          },
+          work: {
+            slug: work.slug,
+            title: work.title,
+            state: work.state,
+          },
+          expected_participant: expected,
+          presence: expected
+            ? {
+                registered: participant !== undefined,
+                present: participant?.present ?? false,
+                first_seen_at: participant?.first_seen_at ?? null,
+                last_heartbeat_at: participant?.last_heartbeat_at ?? null,
+                ball: participant?.ball ?? { has_ball: false, reasons: [] },
+                abandoned: participant?.abandoned ?? false,
+              }
+            : null,
+        };
+      });
   }
 
   function listDocuments(projectSlug) {
@@ -969,6 +1059,7 @@ export function createStore(database, options = {}) {
       state: work.state,
       created_at: work.created_at,
       project: work.project_slug,
+      expected_participant: expectedParticipant(work),
       participants: participantStates(work.id),
       messages: listMessages(projectSlug, workSlug),
     };
@@ -1396,6 +1487,7 @@ export function createStore(database, options = {}) {
     listMessages,
     listProjects,
     listRevisions,
+    listRooms,
     participantStates,
     poll,
     postMessage,

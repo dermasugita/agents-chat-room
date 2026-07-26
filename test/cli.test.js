@@ -52,11 +52,11 @@ after(async () => {
   rmSync(temporaryDirectory, { recursive: true, force: true });
 });
 
-async function runCli(args, cwd) {
+async function runCli(args, cwd, env = {}) {
   try {
     const result = await execFileAsync(process.execPath, [cliPath, ...args], {
       cwd,
-      env: { ...process.env },
+      env: { ...process.env, ...env },
       maxBuffer: 5 * 1024 * 1024,
     });
     return { ...result, code: 0 };
@@ -185,8 +185,12 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     ".agents/skills/session-chat/scripts/self-driven-loop.mjs",
     ".claude/skills/session-chat/scripts/ball-check.mjs",
     ".agents/skills/session-chat/scripts/ball-check.mjs",
+    ".claude/skills/session-chat/scripts/join-room.mjs",
+    ".agents/skills/session-chat/scripts/join-room.mjs",
     ".claude/skills/session-chat/scripts/lib/ao-cli.mjs",
     ".agents/skills/session-chat/scripts/lib/ao-cli.mjs",
+    ".claude/skills/design-handoff/scripts/designer-start.mjs",
+    ".agents/skills/design-handoff/scripts/designer-start.mjs",
     "CLAUDE.md",
     "AGENTS.md",
   ]) {
@@ -207,6 +211,7 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     "watch-passive.mjs",
     "self-driven-loop.mjs",
     "ball-check.mjs",
+    "join-room.mjs",
   ]) {
     const claude = join(
       repository,
@@ -234,6 +239,12 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     readFileSync(claudeHelper, "utf8"),
     readFileSync(agentsHelper, "utf8"),
   );
+  for (const path of [
+    ".claude/skills/design-handoff/scripts/designer-start.mjs",
+    ".agents/skills/design-handoff/scripts/designer-start.mjs",
+  ]) {
+    assert.notEqual(statSync(join(repository, path)).mode & 0o111, 0, path);
+  }
   assert.match(readFileSync(join(repository, ".gitignore"), "utf8"), /^\/\.ao\/$/m);
   assert.match(
     readFileSync(join(repository, ".ao/docs/CONTEXT.md"), "utf8"),
@@ -311,6 +322,460 @@ test("inject creates or reuses --work and the repository is immediately usable",
   assert.match(
     watched.stdout,
     /MESSAGE seq=1 type=message from=inject-worker .*body="usable immediately"/,
+  );
+});
+
+test("server resolution is environment, user config, then repository config", () => {
+  const repository = makeRepository("server-resolution-repository");
+  const homeDirectory = makeRepository("server-resolution-home");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  mkdirSync(join(homeDirectory, ".ao"), { recursive: true });
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    JSON.stringify({ server_url: "http://repository.example" }),
+    "utf8",
+  );
+  writeFileSync(
+    join(homeDirectory, ".ao/config.json"),
+    JSON.stringify({ server_url: "http://user.example" }),
+    "utf8",
+  );
+  const parsed = cliInternals.parseArguments(["rooms", "--repo", repository]);
+
+  assert.deepEqual(
+    cliInternals.resolveServerUrl(parsed, {
+      environment: { AO_SERVER_URL: "http://environment.example" },
+      homeDirectory,
+    }),
+    {
+      server_url: "http://environment.example",
+      source: "AO_SERVER_URL",
+    },
+  );
+  assert.equal(
+    cliInternals.resolveServerUrl(parsed, {
+      environment: {},
+      homeDirectory,
+    }).server_url,
+    "http://user.example",
+  );
+  assert.equal(
+    cliInternals.resolveServerUrl(parsed, {
+      environment: {},
+      homeDirectory: makeRepository("server-resolution-empty-home"),
+    }).server_url,
+    "http://repository.example",
+  );
+});
+
+test("configure writes the one-time user server setting", async () => {
+  const homeDirectory = makeRepository("configured-user-home");
+  const result = await runCli(
+    ["configure", "--server", serverUrl],
+    temporaryDirectory,
+    { HOME: homeDirectory },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(homeDirectory, ".ao/config.json"), "utf8")),
+    { server_url: serverUrl },
+  );
+});
+
+test("cold room join uses the declared slot, pulls context, and exposes the full thread", async () => {
+  const controller = makeRepository("room-controller");
+  await injectRepository(controller, "room-controller");
+  const created = await runCli(
+    [
+      "create-work",
+      "cold-room",
+      "--title",
+      "Cold room",
+      "--implementer",
+      "cold-implementer",
+    ],
+    controller,
+  );
+  assert.equal(created.code, 0, created.stderr);
+  assert.deepEqual(JSON.parse(created.stdout).expected_participant, {
+    identifier: "cold-implementer",
+    role: "implementer",
+  });
+  store.createDocument("sample", {
+    kind: "handoff",
+    slug: "cold-room",
+    title: "Cold room handoff",
+    body: "# Cold room handoff\n\nImplement this.\n",
+    author: "designer",
+  });
+  store.createDocument("sample", {
+    kind: "adr",
+    title: "Cold join decision",
+    body: "# Cold join decision\n\nUse the room slot.\n",
+    author: "designer",
+  });
+  store.postMessage("sample", "cold-room", {
+    idempotency_key: "cold-room-question",
+    from: "designer",
+    role: "designer",
+    type: "question",
+    body: "Confirm the first bounded unit",
+    to: ["cold-implementer"],
+    refs: [],
+  });
+
+  const userHome = makeRepository("cold-room-home");
+  mkdirSync(join(userHome, ".ao"), { recursive: true });
+  writeFileSync(
+    join(userHome, ".ao/config.json"),
+    `${JSON.stringify({ server_url: serverUrl }, null, 2)}\n`,
+    "utf8",
+  );
+  const repository = makeRepository("cold-room-target");
+  const environment = { AO_SERVER_URL: "", HOME: userHome };
+  const listed = await runCli(["rooms", "--json"], repository, environment);
+  assert.equal(listed.code, 0, listed.stderr);
+  const rooms = JSON.parse(listed.stdout).rooms;
+  const roomIndex = rooms.findIndex(
+    (room) =>
+      room.project.slug === "sample" && room.work.slug === "cold-room",
+  );
+  assert.notEqual(roomIndex, -1);
+  assert.deepEqual(rooms[roomIndex].expected_participant, {
+    identifier: "cold-implementer",
+    role: "implementer",
+  });
+  assert.equal(rooms[roomIndex].presence.present, false);
+
+  const helper = resolve(
+    "templates/skills/session-chat/scripts/join-room.mjs",
+  );
+  const roomHelperEnvironment = {
+    AO_CLI: cliPath,
+    AO_SERVER_URL: "",
+    HOME: userHome,
+  };
+  const helperListing = await runNodeScript(
+    helper,
+    [],
+    repository,
+    roomHelperEnvironment,
+  );
+  assert.equal(helperListing.code, 0, helperListing.stderr);
+  assert.match(helperListing.stdout, /Available chat rooms:/);
+  assert.match(helperListing.stdout, /slot=cold-implementer \(implementer\)/);
+  assert.equal(
+    existsSync(join(repository, ".ao/room-selection.json")),
+    true,
+  );
+
+  const joined = await runNodeScript(
+    helper,
+    [String(roomIndex + 1), "--repo", repository],
+    repository,
+    roomHelperEnvironment,
+  );
+  assert.equal(joined.code, 0, joined.stderr);
+  const bootstrap = JSON.parse(joined.stdout);
+  assert.equal(bootstrap.config.identifier, "cold-implementer");
+  assert.equal(bootstrap.config.role, "implementer");
+  assert.equal(bootstrap.config.project, "sample");
+  assert.equal(bootstrap.config.work, "cold-room");
+  assert.equal(bootstrap.config.server_source, join(userHome, ".ao/config.json"));
+  assert.equal(bootstrap.your_ball.has_ball, true);
+  assert.ok(
+    bootstrap.messages.some(
+      ({ body, type }) =>
+        type === "question" && body === "Confirm the first bounded unit",
+    ),
+  );
+  for (const path of [
+    ".ao/config.json",
+    ".ao/docs/CONTEXT.md",
+    ".ao/docs/handoff/cold-room.md",
+    ".agents/skills/session-chat/SKILL.md",
+    ".agents/skills/session-chat/scripts/join-room.mjs",
+  ]) {
+    assert.equal(existsSync(join(repository, path)), true, path);
+  }
+
+  const duplicateRepository = makeRepository("cold-room-duplicate");
+  const duplicate = await runCli(
+    ["join", String(roomIndex + 1), "--repo", duplicateRepository],
+    duplicateRepository,
+    environment,
+  );
+  assert.equal(duplicate.code, 2);
+  assert.match(duplicate.stderr, /WARNING: cold-implementer is already present/);
+  assert.match(duplicate.stderr, /--confirm-occupied/);
+
+  const duplicateListing = await runNodeScript(
+    helper,
+    [],
+    duplicateRepository,
+    roomHelperEnvironment,
+  );
+  assert.equal(duplicateListing.code, 0, duplicateListing.stderr);
+  const confirmed = await runNodeScript(
+    helper,
+    [String(roomIndex + 1), "--repo", duplicateRepository],
+    duplicateRepository,
+    roomHelperEnvironment,
+  );
+  assert.equal(confirmed.code, 0, confirmed.stderr);
+
+  const activeLoop = await runCli(["watch", "--once"], repository, environment);
+  assert.equal(activeLoop.code, 0, activeLoop.stderr);
+  const started = await runCli(
+    [
+      "post",
+      "--type",
+      "status",
+      "--body",
+      "Joined through session-chat; starting the first bounded unit",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(started.code, 0, started.stderr);
+  assert.ok(
+    store
+      .listMessages("sample", "cold-room")
+      .some(({ body }) => body.startsWith("Joined through session-chat")),
+  );
+
+  const compatibilityRepository = makeRepository("room-without-slot");
+  const noSlot = await runCli(
+    ["join", "sample/work-one", "--repo", compatibilityRepository],
+    compatibilityRepository,
+    environment,
+  );
+  assert.equal(noSlot.code, 2);
+  assert.match(noSlot.stderr, /has no implementer slot/);
+  assert.match(noSlot.stderr, /--identifier ID/);
+});
+
+test("designer cold start joins every work and creates missing projects for skeleton grilling", async () => {
+  store.createProject({ slug: "design-project", name: "Design Project" });
+  for (const [slug, title] of [
+    ["active-work", "Active work"],
+    ["question-work", "Question work"],
+    ["idle-work", "Idle work"],
+  ]) {
+    store.createWork("design-project", { slug, title });
+  }
+  store.createDocument("design-project", {
+    kind: "context",
+    title: "Design context",
+    body: "# Design context\n\nShared terms.\n",
+    author: "designer",
+  });
+  store.createDocument("design-project", {
+    kind: "adr",
+    title: "Project decision",
+    body: "# Project decision\n\nA decision.\n",
+    author: "designer",
+  });
+  for (const slug of ["active-work", "question-work", "idle-work"]) {
+    store.createDocument("design-project", {
+      kind: "handoff",
+      slug,
+      title: `${slug} handoff`,
+      body: `# ${slug} handoff\n\nRequirements.\n`,
+      author: "designer",
+    });
+  }
+  store.postMessage("design-project", "active-work", {
+    idempotency_key: "design-active-implementer",
+    from: "active-implementer",
+    role: "implementer",
+    type: "status",
+    body: "Implementation started",
+    to: [],
+    refs: [],
+  });
+  store.postMessage("design-project", "active-work", {
+    idempotency_key: "design-abandoned-ball",
+    from: "designer",
+    role: "designer",
+    type: "status",
+    body: "Continue implementation",
+    to: [],
+    refs: [],
+    ball: ["active-implementer"],
+  });
+  database
+    .prepare(
+      `UPDATE participant
+       SET last_heartbeat_at = '2026-07-25T00:00:00.000Z'
+       WHERE identifier = 'active-implementer'
+         AND work_id = (
+           SELECT work.id FROM work
+           JOIN project ON project.id = work.project_id
+           WHERE project.slug = 'design-project' AND work.slug = 'active-work'
+         )`,
+    )
+    .run();
+  store.postMessage("design-project", "question-work", {
+    idempotency_key: "design-question",
+    from: "question-implementer",
+    role: "implementer",
+    type: "question",
+    body: "Which invariant applies?",
+    to: ["designer"],
+    refs: [],
+  });
+  database
+    .prepare(
+      `UPDATE work
+       SET created_at = '2026-07-25T00:00:00.000Z'
+       WHERE slug = 'idle-work'
+         AND project_id = (SELECT id FROM project WHERE slug = 'design-project')`,
+    )
+    .run();
+
+  const userHome = makeRepository("designer-home");
+  mkdirSync(join(userHome, ".ao"), { recursive: true });
+  writeFileSync(
+    join(userHome, ".ao/config.json"),
+    `${JSON.stringify({ server_url: serverUrl }, null, 2)}\n`,
+    "utf8",
+  );
+  const environment = {
+    AO_CLI: cliPath,
+    AO_SERVER_URL: "",
+    HOME: userHome,
+  };
+  const helper = resolve(
+    "templates/skills/design-handoff/scripts/designer-start.mjs",
+  );
+  const repository = makeRepository("designer-existing-project");
+  const started = await runNodeScript(
+    helper,
+    ["design-project"],
+    repository,
+    environment,
+  );
+  assert.equal(started.code, 0, started.stderr);
+  const bootstrap = JSON.parse(started.stdout);
+  assert.equal(bootstrap.created, false);
+  assert.deepEqual(bootstrap.project, {
+    slug: "design-project",
+    name: "Design Project",
+  });
+  assert.equal(bootstrap.config.identifier, "designer");
+  assert.equal(bootstrap.config.role, "designer");
+  assert.equal("work" in bootstrap.config, false);
+  assert.equal(bootstrap.threads.length, 3);
+  assert.equal(
+    bootstrap.threads.find(({ work }) => work === "question-work").your_ball
+      .has_ball,
+    true,
+  );
+  assert.equal(
+    bootstrap.threads.find(({ work }) => work === "active-work").abandoned[0]
+      .identifier,
+    "active-implementer",
+  );
+  assert.match(
+    bootstrap.threads.find(({ work }) => work === "idle-work").idle_nudge,
+    /5 minutes/,
+  );
+  for (const slug of ["active-work", "question-work", "idle-work"]) {
+    const participant = store
+      .getWork("design-project", slug)
+      .participants.find(({ identifier }) => identifier === "designer");
+    assert.equal(participant.role, "designer");
+    assert.match(participant.last_heartbeat_at, /^2026-/);
+  }
+  for (const path of [
+    ".ao/docs/CONTEXT.md",
+    ".ao/docs/adr/0001-project-decision.md",
+    ".ao/docs/handoff/active-work.md",
+    ".ao/docs/handoff/question-work.md",
+    ".ao/docs/handoff/idle-work.md",
+    ".agents/skills/design-handoff/SKILL.md",
+    ".agents/skills/design-handoff/scripts/designer-start.mjs",
+  ]) {
+    assert.equal(existsSync(join(repository, path)), true, path);
+  }
+
+  await waitForClockTick();
+  store.postMessage("design-project", "active-work", {
+    idempotency_key: "design-new-active",
+    from: "active-implementer",
+    role: "implementer",
+    type: "status",
+    body: "Active work changed on disk",
+    to: [],
+    refs: [],
+  });
+  store.postMessage("design-project", "question-work", {
+    idempotency_key: "design-new-question",
+    from: "question-implementer",
+    role: "implementer",
+    type: "status",
+    body: "Question work changed on disk",
+    to: [],
+    refs: [],
+  });
+  const watched = await runCli(
+    ["watch", "--project", "--once"],
+    repository,
+    { AO_SERVER_URL: "", HOME: userHome },
+  );
+  assert.equal(watched.code, 0, watched.stderr);
+  assert.equal(
+    watched.stdout.match(/^PROJECT_WORK /gm)?.length,
+    3,
+  );
+  assert.match(
+    watched.stdout,
+    /WORK project=design-project work=active-work MESSAGE .*Active work changed on disk/,
+  );
+  assert.match(
+    watched.stdout,
+    /WORK project=design-project work=question-work MESSAGE .*Question work changed on disk/,
+  );
+  assert.doesNotMatch(watched.stdout, /Implementation started/);
+
+  const listRepository = makeRepository("designer-project-list");
+  const projects = await runNodeScript(
+    helper,
+    [],
+    listRepository,
+    environment,
+  );
+  assert.equal(projects.code, 0, projects.stderr);
+  assert.match(projects.stdout, /Available projects:/);
+  assert.match(projects.stdout, /design-project/);
+
+  const newRepository = makeRepository("designer-new-project");
+  const created = await runNodeScript(
+    helper,
+    ["Brand New Product"],
+    newRepository,
+    environment,
+  );
+  assert.equal(created.code, 0, created.stderr);
+  const newBootstrap = JSON.parse(created.stdout);
+  assert.equal(newBootstrap.created, true);
+  assert.deepEqual(newBootstrap.project, {
+    slug: "brand-new-product",
+    name: "Brand New Product",
+  });
+  assert.equal(newBootstrap.skeleton_grill.required, true);
+  assert.equal(newBootstrap.skeleton_grill.first_branches.length, 5);
+  assert.equal(store.getProject("brand-new-product").works.length, 0);
+  const emptyWatch = await runCli(
+    ["watch", "--project", "--once"],
+    newRepository,
+    { AO_SERVER_URL: "", HOME: userHome },
+  );
+  assert.equal(emptyWatch.code, 0, emptyWatch.stderr);
+  assert.match(
+    emptyWatch.stdout,
+    /PROJECT project=brand-new-product works=0 skeleton_grill=true/,
   );
 });
 
@@ -796,7 +1261,7 @@ test("service skill templates contain none of the retired file protocol", () => 
   }
   for (const [index, content] of templateContents.entries()) {
     const path = templatePaths[index];
-    assert.match(content, /ao watch --once/, path);
+    assert.match(content, /ao watch (?:--project )?--once/, path);
     assert.match(
       content,
       /every two minutes|at least every\s+two minutes/,
@@ -805,7 +1270,7 @@ test("service skill templates contain none of the retired file protocol", () => 
     assert.match(content, /persistent `ao watch`/, path);
     assert.match(content, /does not\s+update\s+your heartbeat/, path);
     assert.match(content, /hold (?:the ball|it)/, path);
-    assert.match(content, /treated as abandoned/, path);
+    assert.match(content, /treated as\s+abandoned/, path);
     assert.match(content, /カスタム スケジュール/, path);
     assert.match(content, /Monitor/, path);
     assert.match(
@@ -820,11 +1285,49 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(sessionSkill, /AO_CLI/);
   assert.match(sessionSkill, /cli\.command/);
   assert.match(sessionSkill, /takes precedence/);
+  assert.match(
+    sessionSkill,
+    /AO_SERVER_URL.*~\/\.ao\/config\.json.*repository `\.ao\/config\.json`/s,
+  );
+  assert.match(sessionSkill, /Which room number should I join\?/);
+  assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
+  assert.match(sessionSkill, /handoff.*`CONTEXT\.md`.*every ADR/s);
+  assert.match(sessionSkill, /unanswered question.*before lower-priority work/s);
+  assert.match(sessionSkill, /Begin the self-driven loop.*`ao watch --once`/s);
+  assert.match(sessionSkill, /post a `status` start message/);
+  assert.match(sessionSkill, /Never silently reuse an occupied implementer slot/);
+  const designerSkill = templateContents[1];
+  assert.match(
+    designerSkill,
+    /project name as the only required owner\s+input/,
+  );
+  assert.match(designerSkill, /designer-start\.mjs <PROJECT>/);
+  assert.match(designerSkill, /skeleton_grill\.required=true/);
+  assert.match(designerSkill, /ao watch --project --once/);
+  assert.match(designerSkill, /fans out to every work/);
+  assert.match(designerSkill, /Publish before announcing/);
+  assert.match(designerSkill, /Classify every open judgment/);
+  assert.match(designerSkill, /passing test is not completion\s+evidence/i);
+  assert.match(designerSkill, /heartbeat was\s+one second old/);
+  assert.match(designerSkill, /Inspect diffs and artifacts/);
+  assert.match(designerSkill, /Search\s+the entire source of truth/);
+  assert.match(
+    designerSkill,
+    /four separate omissions or contradictions survived/,
+  );
+  assert.match(designerSkill, /Only the owner can\s+dismiss participants/);
+  assert.match(designerSkill, /Never guess owner-specific facts/);
+  const designerScript = resolve(
+    "templates/skills/design-handoff/scripts/designer-start.mjs",
+  );
+  assert.equal(existsSync(designerScript), true);
+  assert.notEqual(statSync(designerScript).mode & 0o111, 0);
   for (const script of [
     "post-safe.mjs",
     "watch-passive.mjs",
     "self-driven-loop.mjs",
     "ball-check.mjs",
+    "join-room.mjs",
   ]) {
     assert.match(sessionSkill, new RegExp(script.replace(".", "\\.")));
     const source = resolve("templates/skills/session-chat/scripts", script);

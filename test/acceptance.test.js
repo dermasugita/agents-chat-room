@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { createDatabase, getDatabasePragmas } from "../src/db.js";
 import { createHttpServer } from "../src/server.js";
 import { createStore } from "../src/store.js";
@@ -66,6 +67,113 @@ test("database connections enforce WAL, foreign keys, and busy timeout", () => {
     busy_timeout: 5000,
     foreign_keys: 1,
     journal_mode: "wal",
+  });
+});
+
+test("schema version 1 migrates expected-participant columns without losing work", () => {
+  const path = join(temporaryDirectory, "schema-v1.sqlite");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE schema_meta(version INTEGER NOT NULL, migrated_at TEXT NOT NULL);
+    INSERT INTO schema_meta VALUES (1, '2026-07-25T00:00:00.000Z');
+    CREATE TABLE project(
+      id INTEGER PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE work(
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES project(id),
+      slug TEXT NOT NULL,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(project_id, slug)
+    );
+    INSERT INTO project VALUES (1, 'legacy', 'Legacy', '2026-07-25T00:00:00.000Z');
+    INSERT INTO work VALUES (
+      1, 1, 'kept-work', 'Kept work', 'open', '2026-07-25T00:00:00.000Z'
+    );
+  `);
+  legacy.close();
+
+  const migrated = createDatabase(path);
+  assert.equal(
+    migrated.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version,
+    2,
+  );
+  assert.deepEqual(
+    {
+      ...migrated
+        .prepare(
+          `SELECT slug, expected_participant_identifier,
+                  expected_participant_role
+           FROM work`,
+        )
+        .get(),
+    },
+    {
+      slug: "kept-work",
+      expected_participant_identifier: null,
+      expected_participant_role: null,
+    },
+  );
+  migrated.close();
+});
+
+test("room listing exposes the expected implementer and independent presence state", async () => {
+  store.createWork("sample", {
+    slug: "room-state",
+    title: "Room state",
+    implementer: "expected-impl",
+  });
+  let room = store
+    .listRooms()
+    .find(({ work }) => work.slug === "room-state");
+  assert.deepEqual(room.expected_participant, {
+    identifier: "expected-impl",
+    role: "implementer",
+  });
+  assert.deepEqual(room.presence, {
+    registered: false,
+    present: false,
+    first_seen_at: null,
+    last_heartbeat_at: null,
+    ball: { has_ball: false, reasons: [] },
+    abandoned: false,
+  });
+
+  post("room-state", {
+    from: "expected-impl",
+    role: "implementer",
+    body: "active",
+  });
+  post("room-state", {
+    type: "question",
+    body: "Please continue",
+    to: ["expected-impl"],
+  });
+  room = store.listRooms().find(({ work }) => work.slug === "room-state");
+  assert.equal(room.presence.present, true);
+  assert.equal(room.presence.ball.has_ball, true);
+  assert.equal(room.presence.abandoned, false);
+  assert.equal(room.presence.last_heartbeat_at, "2026-07-26T00:00:00.000Z");
+
+  currentTime = new Date(currentTime.getTime() + 3 * 60_000 + 1);
+  room = store.listRooms().find(({ work }) => work.slug === "room-state");
+  assert.equal(room.presence.present, false);
+  assert.equal(room.presence.ball.has_ball, true);
+  assert.equal(room.presence.abandoned, true);
+
+  await withServer(async (base) => {
+    const response = await request(base, "GET", "/api/v1/rooms");
+    assert.equal(response.status, 200);
+    assert.equal(
+      response.body.rooms.find(({ work }) => work.slug === "room-state")
+        .presence.abandoned,
+      true,
+    );
   });
 });
 

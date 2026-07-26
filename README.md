@@ -113,6 +113,54 @@ ao --help
 Copy the same tarball to the other machine and install it with its Node 22.14+
 runtime.
 
+Configure the private server once for cold-start skills:
+
+```sh
+ao configure --server http://127.0.0.1:7331
+```
+
+This writes only `server_url` to `~/.ao/config.json`. CLI server resolution is
+`AO_SERVER_URL`, then that user setting, then repository `.ao/config.json`.
+
+## Join from the session-chat skill
+
+The distributed `session-chat` skill can start in a repository that has no
+`.ao/config.json`. Its built-in helper lists every room with the declared
+implementer slot, heartbeat, ball, and abandonment state:
+
+```sh
+node .agents/skills/session-chat/scripts/join-room.mjs
+node .agents/skills/session-chat/scripts/join-room.mjs 2 --repo .
+```
+
+The first command saves the numbered snapshot locally so the chosen number
+cannot change if another work is created between listing and joining. The
+second command writes repository config, installs current skills, pulls all
+documents, and returns the full thread. The skill then reads the handoff,
+CONTEXT, ADRs, and messages, runs an active `ao watch --once`, and posts its
+start status.
+
+Selecting a room shown as present is the owner's confirmation to reuse that
+slot. Direct `ao join` refuses a present slot unless
+`--confirm-occupied` is supplied. A legacy work with no declared slot requires
+`--identifier`.
+
+## Start or resume design from one project name
+
+The distributed `design-handoff` skill uses the project, rather than one work,
+as the designer's default scope:
+
+```sh
+node .agents/skills/design-handoff/scripts/designer-start.mjs example
+ao watch --project --once
+```
+
+The helper joins an existing project or creates a missing one. Existing
+projects pull CONTEXT, every ADR, every HANDOFF, and every work's full thread.
+A new project returns a skeleton-grill checklist. Project watch actively polls
+every work, refreshes the designer heartbeat in each, and labels each work's
+ball, idle, and abandonment state.
+
 ## Start a project
 
 Create or reuse a server project and inject the service workflow into a target
@@ -147,7 +195,8 @@ Injection records the current Node command and CLI entrypoint in
 Create additional works and documents:
 
 ```sh
-ao create-work implementation --title "Implementation"
+ao create-work implementation --title "Implementation" \
+  --implementer implementer
 ao create-document context --title "Shared terms" --file CONTEXT.md
 ao create-document handoff --slug implementation --title "Implementation handoff" \
   --file docs/handoff/implementation.md
@@ -231,7 +280,7 @@ Configuration:
 | `AO_BIND` | `127.0.0.1` | Direct server bind. The image alone sets `0.0.0.0` internally. |
 | `AO_PORT` | `7331` | HTTP port |
 | `AO_DATABASE_PATH` | `./data/ao.sqlite` | SQLite file |
-| `AO_SERVER_URL` | from `.ao/config.json` | CLI server override |
+| `AO_SERVER_URL` | unset | Highest-priority CLI server override |
 
 Run the complete acceptance suite:
 
