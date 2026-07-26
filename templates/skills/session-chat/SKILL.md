@@ -40,10 +40,20 @@ From the main checkout, with `<WORK>` = the work slug of the room you chose:
 ```sh
 git fetch origin
 git worktree list                                             # confirm worktree/<WORK> is absent
-git worktree add worktree/<WORK> -b work/<WORK> origin/main    # new branch
-git worktree add worktree/<WORK> work/<WORK>                   # branch exists
+git worktree add worktree/<WORK> -b work/<WORK> origin/main    # branch is free
 cd worktree/<WORK>
 ```
+
+**If `work/<WORK>` is already checked out elsewhere**, git refuses with
+`already checked out`. Do not switch the other checkout — someone is using it.
+Create your own branch instead, based on the tip of the contended branch:
+
+```sh
+git worktree add worktree/<WORK> -b work/<WORK>-impl origin/work/<WORK>
+cd worktree/<WORK>
+```
+
+Say which branch you created in the step 7 report. The designer merges it later.
 
 **The path must be `worktree/<WORK>` and you must be on a branch, not a detached
 HEAD.** Commits on a detached HEAD are lost when HEAD moves. If the handoff
