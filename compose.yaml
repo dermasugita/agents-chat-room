@@ -6,9 +6,10 @@ services:
         - linux/amd64
     image: agents-chat-room:0.1.0
     restart: unless-stopped
+    user: "${AO_UID:-1000}:${AO_GID:-1000}"
     environment:
       AO_BIND: 0.0.0.0
-      AO_DATABASE_PATH: /data/ao.sqlite
+      AO_DATABASE_PATH: /var/lib/agents-chat-room/ao.sqlite
       AO_PORT: "7331"
     ports:
       - name: web
@@ -17,7 +18,33 @@ services:
         host_ip: 127.0.0.1
         protocol: tcp
     volumes:
-      - agents-chat-room-data:/data
+      - type: bind
+        source: ${AO_STATE_DIR:?set AO_STATE_DIR to a persistent local-disk directory}
+        target: /var/lib/agents-chat-room
 
-volumes:
-  agents-chat-room-data:
+  backup:
+    image: agents-chat-room:0.1.0
+    restart: unless-stopped
+    user: "${AO_UID:-1000}:${AO_GID:-1000}"
+    depends_on:
+      - server
+    command:
+      - node
+      - scripts/backup-loop.mjs
+      - --source
+      - /var/lib/agents-chat-room/ao.sqlite
+      - --destination-dir
+      - /backups/agents-chat-room
+      - --interval-minutes
+      - "${AO_BACKUP_INTERVAL_MINUTES:-15}"
+      - --keep
+      - "${AO_BACKUP_GENERATIONS:-192}"
+      - --require-nfs
+    volumes:
+      - type: bind
+        source: ${AO_STATE_DIR:?set AO_STATE_DIR to a persistent local-disk directory}
+        target: /var/lib/agents-chat-room
+        read_only: true
+      - type: bind
+        source: /data
+        target: /backups

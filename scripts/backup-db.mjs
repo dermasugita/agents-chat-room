@@ -1,9 +1,14 @@
 #!/usr/bin/env node
 
-import { existsSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, renameSync, unlinkSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { mkdir } from "node:fs/promises";
-import { DatabaseSync } from "node:sqlite";
+import {
+  inspectDatabase,
+  storageUsage,
+  vacuumInto,
+} from "./lib/database-snapshot.mjs";
 
 const [sourceValue, destinationValue] = process.argv.slice(2);
 if (!sourceValue || !destinationValue) {
@@ -27,54 +32,52 @@ if (existsSync(destination)) {
 }
 
 await mkdir(dirname(destination), { recursive: true });
-const sourceDatabase = new DatabaseSync(source, { readOnly: true });
+const temporary = `${destination}.partial-${process.pid}-${randomUUID()}`;
+let inspection;
 try {
-  sourceDatabase.exec("PRAGMA busy_timeout = 5000");
-  const destinationLiteral = destination.replaceAll("'", "''");
-  sourceDatabase.exec(`VACUUM INTO '${destinationLiteral}'`);
-} finally {
-  sourceDatabase.close();
-}
-
-const backupDatabase = new DatabaseSync(destination, { readOnly: true });
-const tables = [];
-try {
-  const rows = backupDatabase
-    .prepare(
-      `SELECT name
-       FROM sqlite_schema
-       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
-       ORDER BY name`,
-    )
-    .all();
-  for (const { name } of rows) {
-    const quoted = `"${name.replaceAll('"', '""')}"`;
-    const count = backupDatabase
-      .prepare(`SELECT COUNT(*) AS count FROM ${quoted}`)
-      .get().count;
-    tables.push({ name, count });
+  vacuumInto(source, temporary);
+  inspection = inspectDatabase(temporary);
+} catch (error) {
+  if (existsSync(temporary)) {
+    unlinkSync(temporary);
   }
-} finally {
-  backupDatabase.close();
+  console.error(`backup-db: snapshot failed: ${error.message}`);
+  process.exit(1);
 }
 
-const totalRows = tables.reduce((total, table) => total + Number(table.count), 0);
-const contentRows = tables
-  .filter(({ name }) => name !== "schema_meta")
-  .reduce((total, table) => total + Number(table.count), 0);
 const report = {
   source,
   destination,
   method: "VACUUM INTO",
-  total_rows: totalRows,
-  content_rows: contentRows,
-  tables,
+  total_rows: inspection.total_rows,
+  content_rows: inspection.content_rows,
+  tables: inspection.tables,
+  foreign_key_issues: inspection.foreign_key_issues,
+  source_storage: storageUsage(dirname(source)),
 };
-console.log(JSON.stringify(report, null, 2));
 
-if (tables.length === 0 || contentRows === 0) {
+if (
+  inspection.tables.length === 0 ||
+  inspection.content_rows === 0 ||
+  inspection.foreign_key_issues.length > 0
+) {
+  console.log(JSON.stringify(report, null, 2));
+  unlinkSync(temporary);
   console.error(
-    `backup-db: backup contains no domain rows: ${destination}`,
+    inspection.foreign_key_issues.length > 0
+      ? `backup-db: backup failed foreign-key validation: ${destination}`
+      : `backup-db: backup contains no domain rows: ${destination}`,
   );
   process.exit(2);
 }
+
+try {
+  renameSync(temporary, destination);
+} catch (error) {
+  if (existsSync(temporary)) {
+    unlinkSync(temporary);
+  }
+  console.error(`backup-db: cannot publish snapshot: ${error.message}`);
+  process.exit(1);
+}
+console.log(JSON.stringify(report, null, 2));
