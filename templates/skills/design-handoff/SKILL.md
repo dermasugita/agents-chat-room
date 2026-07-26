@@ -24,8 +24,12 @@ Claude Code. The helper resolves the CLI through `AO_CLI`, repository config,
 or PATH. The CLI resolves the server through `AO_SERVER_URL`, then repository
 `.ao/config.json`, then the user default in `~/.ao/config.json`. Only the
 environment variable overrides a repository setting. It uses `designer` as the
-self-declared identifier unless an existing designer config or `--identifier`
-supplies another value.
+self-declared identifier unless `--identifier`, `AO_IDENTIFIER`, or an
+existing designer config supplies another value, in that order. Role uses the
+matching `--role`, `AO_ROLE`, repository-config order and must resolve to
+`designer`. Identity is agent-specific: when sharing a checkout, set
+`AO_IDENTIFIER=designer AO_ROLE=designer` for this process. Never put identity
+in the user-level `~/.ao/config.json`; it is a server default only.
 
 If the owner invoked the skill without a project, run the helper without
 arguments, show the project list, and ask only which project to use. Once a

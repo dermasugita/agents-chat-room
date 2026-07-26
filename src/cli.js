@@ -32,17 +32,17 @@ const HELP = `agents-chat-room CLI
 Usage:
   ao configure --server URL
   ao projects [--json]
-  ao design <PROJECT> [--repo PATH] [--identifier ID]
+  ao design <PROJECT> [--repo PATH] [--identifier ID] [--role designer]
   ao rooms [--json] [--repo PATH]
-  ao join <NUMBER|PROJECT/WORK> [--repo PATH] [--identifier ID] [--confirm-occupied]
-  ao inject <repo> --server URL --identifier ID --role ROLE [--project SLUG] [--work SLUG] [--work-title TITLE]
-  ao pull [DOC] [--force] [--repo PATH]
-  ao push <DOC> [--note TEXT] [--repo PATH]
-  ao post --type TYPE --body TEXT [--to ID[,ID]] [--reply-to SEQ] [--ball ID[,ID]]
-  ao messages [--since SEQ]
-  ao watch [--project] [--since SEQ] [--interval SECONDS] [--once]
-  ao close <SEQ>
-  ao resolve
+  ao join <NUMBER|PROJECT/WORK> [--repo PATH] [--identifier ID] [--role ROLE] [--confirm-occupied]
+  ao inject <repo> --server URL [--identifier ID] [--role ROLE] [--project SLUG] [--work SLUG] [--work-title TITLE]
+  ao pull [DOC] [--force] [--repo PATH] [--identifier ID] [--role ROLE]
+  ao push <DOC> [--note TEXT] [--repo PATH] [--identifier ID] [--role ROLE]
+  ao post --type TYPE --body TEXT [--to ID[,ID]] [--reply-to SEQ] [--ball ID[,ID]] [--identifier ID] [--role ROLE]
+  ao messages [--since SEQ] [--identifier ID] [--role ROLE]
+  ao watch [--project] [--since SEQ] [--interval SECONDS] [--once] [--identifier ID] [--role ROLE]
+  ao close <SEQ> [--identifier ID] [--role ROLE]
+  ao resolve [--identifier ID] [--role ROLE]
   ao create-work <SLUG> --title TITLE [--implementer ID]
   ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
   ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]
@@ -52,7 +52,58 @@ Usage:
 
 Server resolution order is AO_SERVER_URL, repository .ao/config.json, then
 ~/.ao/config.json. Run ao configure once to write the user default.
+
+Identity resolution order is --identifier/--role, AO_IDENTIFIER/AO_ROLE, then
+repository .ao/config.json. Identity belongs to an agent, not a repository.
 `;
+
+const CONTEXT_OPTIONS = ["repo", "work", "identifier", "role"];
+const COMMAND_OPTIONS = new Map([
+  ["configure", ["server"]],
+  ["projects", ["json", "repo"]],
+  ["design", ["repo", "identifier", "role", "force"]],
+  ["rooms", ["json", "repo"]],
+  ["join", ["repo", "identifier", "role", "confirm-occupied", "force"]],
+  [
+    "inject",
+    [
+      "server",
+      "identifier",
+      "role",
+      "project",
+      "work",
+      "work-title",
+      "name",
+    ],
+  ],
+  ["delete-project", ["confirm", "repo"]],
+  ["delete-work", ["confirm", "repo"]],
+  ["delete-participant", ["repo"]],
+  ["pull", [...CONTEXT_OPTIONS, "force"]],
+  ["push", [...CONTEXT_OPTIONS, "note"]],
+  [
+    "post",
+    [
+      ...CONTEXT_OPTIONS,
+      "type",
+      "body",
+      "body-file",
+      "to",
+      "reply-to",
+      "ball",
+      "idempotency-key",
+      "expect",
+      "ref",
+    ],
+  ],
+  ["messages", [...CONTEXT_OPTIONS, "since"]],
+  ["watch", [...CONTEXT_OPTIONS, "project", "since", "interval", "once"]],
+  ["close", CONTEXT_OPTIONS],
+  ["resolve", CONTEXT_OPTIONS],
+  ["create-work", [...CONTEXT_OPTIONS, "title", "implementer"]],
+  ["create-document", [...CONTEXT_OPTIONS, "title", "file", "slug"]],
+  ["import", [...CONTEXT_OPTIONS, "yes", "project", "name"]],
+]);
 
 class CliError extends Error {
   constructor(message, exitCode = 1) {
@@ -151,6 +202,21 @@ function requireOption(parsed, name) {
   return String(value);
 }
 
+function assertKnownOptions(command, parsed) {
+  const allowed = COMMAND_OPTIONS.get(command);
+  if (!allowed) {
+    throw new CliError(`Unknown command: ${command}\n\n${HELP}`);
+  }
+  const allowedSet = new Set(allowed);
+  for (const name of parsed.options.keys()) {
+    if (!allowedSet.has(name)) {
+      throw new CliError(
+        `Unknown option --${name} for ao ${command}. Run \`ao help\` for supported options.`,
+      );
+    }
+  }
+}
+
 function readJson(path, fallback = undefined) {
   if (!existsSync(path)) {
     return fallback;
@@ -220,6 +286,107 @@ function validServerUrl(value) {
     : null;
 }
 
+function validIdentityValue(value) {
+  return typeof value === "string" && value.trim().length > 0
+    ? value.trim()
+    : null;
+}
+
+function resolveIdentity(parsed, repositoryConfig = {}, options = {}) {
+  const environment = options.environment ?? process.env;
+  const defaults = options.defaults ?? {};
+  const explicitIdentifier = hasOption(parsed, "identifier")
+    ? requireOption(parsed, "identifier")
+    : null;
+  const explicitRole = hasOption(parsed, "role")
+    ? requireOption(parsed, "role")
+    : null;
+  const identifier =
+    validIdentityValue(explicitIdentifier) ??
+    validIdentityValue(environment.AO_IDENTIFIER) ??
+    validIdentityValue(repositoryConfig?.identifier) ??
+    validIdentityValue(defaults.identifier);
+  const role =
+    validIdentityValue(explicitRole) ??
+    validIdentityValue(environment.AO_ROLE) ??
+    validIdentityValue(repositoryConfig?.role) ??
+    validIdentityValue(defaults.role);
+
+  if (!identifier) {
+    throw new CliError(
+      "Cannot resolve the participant identifier. Pass --identifier, set AO_IDENTIFIER, or configure identifier in repository .ao/config.json.",
+    );
+  }
+  if (!role) {
+    throw new CliError(
+      "Cannot resolve the participant role. Pass --role, set AO_ROLE, or configure role in repository .ao/config.json.",
+    );
+  }
+  if (!["owner", "designer", "implementer"].includes(role)) {
+    throw new CliError(
+      `Invalid participant role ${JSON.stringify(role)}; expected owner, designer, or implementer.`,
+    );
+  }
+
+  return {
+    identifier,
+    role,
+    identifier_source: explicitIdentifier
+      ? "--identifier"
+      : validIdentityValue(environment.AO_IDENTIFIER)
+        ? "AO_IDENTIFIER"
+        : validIdentityValue(repositoryConfig?.identifier)
+          ? "repository .ao/config.json"
+          : "default",
+    role_source: explicitRole
+      ? "--role"
+      : validIdentityValue(environment.AO_ROLE)
+        ? "AO_ROLE"
+        : validIdentityValue(repositoryConfig?.role)
+          ? "repository .ao/config.json"
+          : "default",
+  };
+}
+
+function warnIdentityOverwrite(operation, configPath, existingConfig, identity) {
+  const changes = [];
+  const existingIdentifier = validIdentityValue(existingConfig?.identifier);
+  const existingRole = validIdentityValue(existingConfig?.role);
+  if (existingIdentifier && existingIdentifier !== identity.identifier) {
+    changes.push(
+      `identifier ${JSON.stringify(existingIdentifier)} -> ${JSON.stringify(identity.identifier)}`,
+    );
+  }
+  if (existingRole && existingRole !== identity.role) {
+    changes.push(
+      `role ${JSON.stringify(existingRole)} -> ${JSON.stringify(identity.role)}`,
+    );
+  }
+  if (changes.length === 0) {
+    return;
+  }
+  console.error(
+    `WARNING: ao ${operation} will overwrite agent identity in ${configPath}: ${changes.join(", ")}. Shared repositories need --identifier/--role or AO_IDENTIFIER/AO_ROLE per agent.`,
+  );
+}
+
+function warnIgnoredUserIdentity(configPath, config, { removing = false } = {}) {
+  const ignoredIdentity = [
+    validIdentityValue(config?.identifier)
+      ? `identifier=${JSON.stringify(config.identifier)}`
+      : null,
+    validIdentityValue(config?.role)
+      ? `role=${JSON.stringify(config.role)}`
+      : null,
+  ].filter(Boolean);
+  if (ignoredIdentity.length === 0) {
+    return;
+  }
+  console.error(
+    `WARNING: ${removing ? "ignoring and removing" : "ignoring"} agent identity from user configuration ${configPath}: ${ignoredIdentity.join(", ")}. Identity must come from --identifier/--role, AO_IDENTIFIER/AO_ROLE, or repository config.`,
+  );
+}
+
 function resolveServerUrl(parsed, options = {}) {
   const environment = options.environment ?? process.env;
   const fromEnvironment = validServerUrl(environment.AO_SERVER_URL);
@@ -247,6 +414,7 @@ function resolveServerUrl(parsed, options = {}) {
     homeDirectory: options.homeDirectory,
   });
   const userConfig = readJson(userPath);
+  warnIgnoredUserIdentity(userPath, userConfig);
   const fromUser = validServerUrl(userConfig?.server_url);
   if (fromUser) {
     return { server_url: fromUser, source: userPath };
@@ -262,17 +430,24 @@ function resolveServerUrl(parsed, options = {}) {
 function loadContext(parsed) {
   const repository = findRepository(option(parsed, "repo", process.cwd()));
   const configPath = join(repository, ".ao", "config.json");
-  const config = readJson(configPath);
-  if (!config) {
+  const repositoryConfig = readJson(configPath);
+  if (!repositoryConfig) {
     throw new CliError(`Missing configuration: ${configPath}`);
   }
-  config.server_url = resolveServerUrl(parsed).server_url;
-  if (!config.server_url || !config.project || !config.identifier || !config.role) {
+  const identity = resolveIdentity(parsed, repositoryConfig);
+  const config = {
+    ...repositoryConfig,
+    server_url: resolveServerUrl(parsed).server_url,
+    identifier: identity.identifier,
+    role: identity.role,
+  };
+  if (!config.server_url || !config.project) {
     throw new CliError(`${configPath} is missing required fields`);
   }
   return {
     config,
     configPath,
+    identity,
     repository,
     statePath: join(repository, ".ao", "state.json"),
   };
@@ -355,7 +530,13 @@ function configure(parsed) {
   const path = userConfigPath();
   const existing = readJson(path, {});
   const serverUrl = requireOption(parsed, "server");
-  writeJson(path, { ...existing, server_url: serverUrl });
+  warnIgnoredUserIdentity(path, existing, { removing: true });
+  const {
+    identifier: _ignoredIdentifier,
+    role: _ignoredRole,
+    ...serverDefaults
+  } = existing;
+  writeJson(path, { ...serverDefaults, server_url: serverUrl });
   return { path, server_url: serverUrl };
 }
 
@@ -518,32 +699,34 @@ async function designProject(parsed) {
     "GET",
     `/projects/${apiPath(project.slug)}`,
   );
-  const existingConfig = readJson(join(repository, ".ao", "config.json"));
-  const identifier = String(
-    hasOption(parsed, "identifier")
-      ? requireOption(parsed, "identifier")
-      : existingConfig?.role === "designer"
-        ? existingConfig.identifier
-        : "designer",
-  ).trim();
-  if (!identifier) {
-    throw new CliError("--identifier must be non-empty");
+  const configPath = join(repository, ".ao", "config.json");
+  const existingConfig = readJson(configPath);
+  const existingDesignerConfig =
+    existingConfig?.role === "designer" ? existingConfig : {};
+  const identity = resolveIdentity(parsed, existingDesignerConfig, {
+    defaults: { identifier: "designer", role: "designer" },
+  });
+  if (identity.role !== "designer") {
+    throw new CliError(
+      `ao design requires role designer; resolved ${identity.role} from ${identity.role_source}.`,
+    );
   }
   const config = {
     server_url: listing.server.server_url,
     project: project.slug,
-    identifier,
-    role: "designer",
+    identifier: identity.identifier,
+    role: identity.role,
     cli: {
       command: process.execPath,
       args: [CLI_ENTRYPOINT],
     },
   };
+  warnIdentityOverwrite("design", configPath, existingConfig, identity);
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
-  writeJson(join(repository, ".ao", "config.json"), config);
+  writeJson(configPath, config);
   const context = {
     config,
-    configPath: join(repository, ".ao", "config.json"),
+    configPath,
     repository,
     statePath: join(repository, ".ao", "state.json"),
   };
@@ -692,23 +875,33 @@ async function joinRoom(parsed) {
   const listing = await fetchRooms(parsed);
   const room = selectRoom(listing.rooms, String(selection));
   const expected = room.expected_participant;
-  const identifierValue = hasOption(parsed, "identifier")
-    ? requireOption(parsed, "identifier")
-    : expected?.identifier;
-  if (
-    identifierValue === undefined ||
-    identifierValue === true ||
-    String(identifierValue).trim() === ""
-  ) {
+  let identity;
+  try {
+    identity = resolveIdentity(parsed, {}, {
+      defaults: {
+        identifier: expected?.identifier,
+        role: expected?.role ?? "implementer",
+      },
+    });
+  } catch (error) {
+    if (
+      error instanceof CliError &&
+      error.message.startsWith("Cannot resolve the participant identifier")
+    ) {
+      throw new CliError(
+        `Room ${room.project.slug}/${room.work.slug} has no implementer slot. Ask the owner for an identifier, then repeat with --identifier ID.`,
+        2,
+      );
+    }
+    throw error;
+  }
+  const identifier = identity.identifier;
+  const role = identity.role;
+  if (!identifier) {
     throw new CliError(
       `Room ${room.project.slug}/${room.work.slug} has no implementer slot. Ask the owner for an identifier, then repeat with --identifier ID.`,
       2,
     );
-  }
-  const identifier = String(identifierValue).trim();
-  const role = String(option(parsed, "role", expected?.role ?? "implementer"));
-  if (!["owner", "designer", "implementer"].includes(role)) {
-    throw new CliError("--role must be owner, designer, or implementer");
   }
   const occupyingExpectedSlot =
     expected?.identifier === identifier && room.presence?.present;
@@ -730,11 +923,14 @@ async function joinRoom(parsed) {
       args: [CLI_ENTRYPOINT],
     },
   };
+  const configPath = join(repository, ".ao", "config.json");
+  const existingConfig = readJson(configPath, {});
+  warnIdentityOverwrite("join", configPath, existingConfig, identity);
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
-  writeJson(join(repository, ".ao", "config.json"), config);
+  writeJson(configPath, config);
   const context = {
     config,
-    configPath: join(repository, ".ao", "config.json"),
+    configPath,
     repository,
     statePath: join(repository, ".ao", "state.json"),
   };
@@ -1244,6 +1440,9 @@ async function inject(parsed) {
   const selectedWorkTitle = hasOption(parsed, "work-title")
     ? requireOption(parsed, "work-title")
     : undefined;
+  const configPath = join(repository, ".ao", "config.json");
+  const existingConfig = readJson(configPath, {});
+  const identity = resolveIdentity(parsed, existingConfig);
   let serverUrl = option(parsed, "server");
   if (serverUrl === undefined) {
     try {
@@ -1255,18 +1454,14 @@ async function inject(parsed) {
   const config = {
     server_url: String(serverUrl),
     project: String(project),
-    identifier: requireOption(parsed, "identifier"),
-    role: requireOption(parsed, "role"),
+    identifier: identity.identifier,
+    role: identity.role,
     cli: {
       command: process.execPath,
       args: [CLI_ENTRYPOINT],
     },
     ...(selectedWork ? { work: String(selectedWork) } : {}),
   };
-  if (!["owner", "designer", "implementer"].includes(config.role)) {
-    throw new CliError("--role must be owner, designer, or implementer");
-  }
-
   try {
     await api(config, "POST", "/projects", {
       slug: config.project,
@@ -1307,8 +1502,9 @@ async function inject(parsed) {
     }
   }
 
+  warnIdentityOverwrite("inject", configPath, existingConfig, identity);
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
-  writeJson(join(repository, ".ao", "config.json"), config);
+  writeJson(configPath, config);
   const context = {
     config,
     repository,
@@ -1527,6 +1723,7 @@ export async function main(argv) {
     process.stdout.write(HELP);
     return;
   }
+  assertKnownOptions(command, parsed);
 
   if (command === "inject") {
     print(await inject(parsed));
@@ -1702,6 +1899,7 @@ export const cliInternals = {
   hash,
   parseArguments,
   projectSlug,
+  resolveIdentity,
   resolveServerUrl,
   selectRoom,
   stripCopyHeader,

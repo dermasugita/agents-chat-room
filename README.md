@@ -188,7 +188,22 @@ ao configure --server http://127.0.0.1:7331
 This writes only the default `server_url` to `~/.ao/config.json`. CLI server
 resolution is `AO_SERVER_URL`, then repository `.ao/config.json`, then that
 user default. Only the environment variable overrides a repository-specific
-server.
+server. User config never supplies `identifier` or `role`; if those fields are
+present, the CLI warns and ignores them.
+
+Participant identity is resolved separately because it belongs to one agent,
+not to the shared repository:
+
+1. `--identifier` / `--role`
+2. `AO_IDENTIFIER` / `AO_ROLE`
+3. repository `.ao/config.json`
+
+Every repository command, including `post`, `messages`, `watch`, `pull`,
+`push`, `close`, and `resolve`, accepts the explicit identity flags. When two
+agents share one checkout, give each process its own `AO_IDENTIFIER` and
+`AO_ROLE`, or pass both flags. `join`, `inject`, and `design` warn before
+overwriting a different identity already stored in repository config.
+Unsupported options fail instead of being silently ignored.
 
 ## Join from the session-chat skill
 
@@ -372,6 +387,8 @@ Configuration:
 | `AO_PORT` | `7331` | HTTP port |
 | `AO_DATABASE_PATH` | `./data/ao.sqlite` | SQLite file |
 | `AO_SERVER_URL` | unset | Highest-priority CLI server override |
+| `AO_IDENTIFIER` | unset | Agent-specific identifier override |
+| `AO_ROLE` | unset | Agent-specific role override |
 
 Run the complete acceptance suite:
 

@@ -57,6 +57,15 @@ Never silently reuse an occupied implementer slot: direct `ao join` refuses it
 without `--confirm-occupied`; the helper supplies that flag only after the
 owner selected a visibly occupied room.
 
+Identity belongs to the running agent, not to the repository. The CLI resolves
+each identity field in this order: `--identifier` / `--role`,
+`AO_IDENTIFIER` / `AO_ROLE`, then repository `.ao/config.json`. If multiple
+agents share one checkout, give every process its own environment overrides or
+pass both flags on every command. Do not write identity into
+`~/.ao/config.json`; that file is only a one-time server default and the CLI
+warns and ignores identity fields found there. `join`, `inject`, and `design`
+warn before replacing a different identity in repository config.
+
 If config says `role=designer` and has no `work`, it is intentionally
 project-scoped. Follow the `design-handoff` skill, use
 `ao watch --project --once`, and include `--work <SLUG>` when posting to one
@@ -78,8 +87,9 @@ and do not create a pull request or deploy merely because implementation is
 complete. A passing test suite is evidence, not a substitute for checking each
 domain-specific acceptance criterion.
 
-Read `.ao/config.json` to confirm your identifier, role, project, work, and
-server before posting.
+Read `.ao/config.json` to confirm project, work, and server before posting.
+Confirm whether `--identifier` / `--role` or `AO_IDENTIFIER` / `AO_ROLE`
+override the repository's default identity.
 
 At the start of every turn:
 

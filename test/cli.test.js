@@ -61,6 +61,8 @@ async function runCli(args, cwd, env = {}) {
       cwd,
       env: {
         ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
         AO_SERVER_URL: "",
         HOME: isolatedHome,
         ...env,
@@ -81,7 +83,13 @@ async function runPersistentCli(args, cwd, timeout = 250) {
   try {
     await execFileAsync(process.execPath, [cliPath, ...args], {
       cwd,
-      env: { ...process.env, AO_SERVER_URL: "", HOME: isolatedHome },
+      env: {
+        ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
+        AO_SERVER_URL: "",
+        HOME: isolatedHome,
+      },
       maxBuffer: 5 * 1024 * 1024,
       timeout,
     });
@@ -97,6 +105,8 @@ async function runNodeScript(script, args, cwd, env = {}) {
       cwd,
       env: {
         ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
         AO_SERVER_URL: "",
         HOME: isolatedHome,
         ...env,
@@ -120,6 +130,8 @@ async function runTimedNodeScript(script, args, cwd, env = {}, timeout = 250) {
       cwd,
       env: {
         ...process.env,
+        AO_IDENTIFIER: "",
+        AO_ROLE: "",
         AO_SERVER_URL: "",
         HOME: isolatedHome,
         ...env,
@@ -394,6 +406,52 @@ test("server resolution is environment, repository config, then user default", (
   );
 });
 
+test("identity resolution is flags, environment, then repository config", () => {
+  const repositoryConfig = {
+    identifier: "repository-agent",
+    role: "implementer",
+  };
+  const fromRepository = cliInternals.resolveIdentity(
+    cliInternals.parseArguments(["watch"]),
+    repositoryConfig,
+    { environment: {} },
+  );
+  assert.equal(fromRepository.identifier, "repository-agent");
+  assert.equal(fromRepository.role, "implementer");
+
+  const fromEnvironment = cliInternals.resolveIdentity(
+    cliInternals.parseArguments(["watch"]),
+    repositoryConfig,
+    {
+      environment: {
+        AO_IDENTIFIER: "environment-agent",
+        AO_ROLE: "designer",
+      },
+    },
+  );
+  assert.equal(fromEnvironment.identifier, "environment-agent");
+  assert.equal(fromEnvironment.role, "designer");
+
+  const fromFlags = cliInternals.resolveIdentity(
+    cliInternals.parseArguments([
+      "watch",
+      "--identifier",
+      "explicit-agent",
+      "--role",
+      "owner",
+    ]),
+    repositoryConfig,
+    {
+      environment: {
+        AO_IDENTIFIER: "environment-agent",
+        AO_ROLE: "designer",
+      },
+    },
+  );
+  assert.equal(fromFlags.identifier, "explicit-agent");
+  assert.equal(fromFlags.role, "owner");
+});
+
 test("configure writes the one-time user server setting", async () => {
   const homeDirectory = makeRepository("configured-user-home");
   const result = await runCli(
@@ -406,6 +464,78 @@ test("configure writes the one-time user server setting", async () => {
     JSON.parse(readFileSync(join(homeDirectory, ".ao/config.json"), "utf8")),
     { server_url: serverUrl },
   );
+});
+
+test("user config identity is warned, ignored, and removed by configure", async () => {
+  const homeDirectory = makeRepository("configured-user-identity-home");
+  mkdirSync(join(homeDirectory, ".ao"), { recursive: true });
+  writeFileSync(
+    join(homeDirectory, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: "http://127.0.0.1:1",
+        identifier: "unsafe-user-default",
+        role: "designer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const result = await runCli(
+    ["configure", "--server", serverUrl],
+    temporaryDirectory,
+    { HOME: homeDirectory },
+  );
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stderr, /ignoring and removing agent identity/);
+  assert.match(result.stderr, /unsafe-user-default/);
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(homeDirectory, ".ao/config.json"), "utf8")),
+    { server_url: serverUrl },
+  );
+});
+
+test("every command rejects options it does not apply", async () => {
+  for (const command of [
+    "configure",
+    "projects",
+    "design",
+    "rooms",
+    "join",
+    "inject",
+    "delete-project",
+    "delete-work",
+    "delete-participant",
+    "pull",
+    "push",
+    "post",
+    "messages",
+    "watch",
+    "close",
+    "resolve",
+    "create-work",
+    "create-document",
+    "import",
+  ]) {
+    const result = await runCli(
+      [command, "--definitely-unsupported"],
+      temporaryDirectory,
+    );
+    assert.equal(result.code, 1, `${command}: ${result.stderr}`);
+    assert.match(
+      result.stderr,
+      new RegExp(`Unknown option --definitely-unsupported for ao ${command}`),
+      command,
+    );
+  }
+
+  const configure = await runCli(
+    ["configure", "--server", serverUrl, "--identifier", "silently-ignored"],
+    temporaryDirectory,
+  );
+  assert.equal(configure.code, 1);
+  assert.match(configure.stderr, /Unknown option --identifier for ao configure/);
 });
 
 test("repository config overrides a conflicting user default in real CLI commands", async () => {
@@ -425,6 +555,234 @@ test("repository config overrides a conflicting user default in real CLI command
   });
   assert.equal(result.code, 0, result.stderr);
   assert.match(heartbeatFor("repository-priority-agent"), /^2026-/);
+});
+
+test("two agents share one repository without mixing names or leaving answered questions abandoned", async () => {
+  store.createProject({ slug: "shared-identity", name: "Shared identity" });
+  store.createWork("shared-identity", {
+    slug: "shared-work",
+    title: "Shared work",
+  });
+  const repository = makeRepository("shared-identity-repository");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  const repositoryConfig = {
+    server_url: serverUrl,
+    project: "shared-identity",
+    work: "shared-work",
+    identifier: "repository-default",
+    role: "implementer",
+    cli: {
+      command: process.execPath,
+      args: [cliPath],
+    },
+  };
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(repositoryConfig, null, 2)}\n`,
+    "utf8",
+  );
+
+  const implementerEnvironment = {
+    AO_IDENTIFIER: "shared-implementer",
+    AO_ROLE: "implementer",
+  };
+  const designerEnvironment = {
+    AO_IDENTIFIER: "shared-designer",
+    AO_ROLE: "designer",
+  };
+  const question = await runCli(
+    [
+      "post",
+      "--type",
+      "question",
+      "--to",
+      "shared-designer",
+      "--body",
+      "Does the shared identity stay distinct?",
+    ],
+    repository,
+    implementerEnvironment,
+  );
+  assert.equal(question.code, 0, question.stderr);
+  const questionSeq = JSON.parse(question.stdout).seq;
+
+  const designerJoin = await runCli(
+    ["watch", "--once"],
+    repository,
+    designerEnvironment,
+  );
+  assert.equal(designerJoin.code, 0, designerJoin.stderr);
+  database
+    .prepare(
+      `UPDATE participant
+          SET last_heartbeat_at = ?
+        WHERE identifier = ?
+          AND work_id = (
+            SELECT work.id
+              FROM work
+              JOIN project ON project.id = work.project_id
+             WHERE project.slug = ? AND work.slug = ?
+          )`,
+    )
+    .run(
+      "2020-01-01T00:00:00.000Z",
+      "shared-designer",
+      "shared-identity",
+      "shared-work",
+    );
+
+  const beforeAnswer = await runCli(
+    ["watch", "--once"],
+    repository,
+    implementerEnvironment,
+  );
+  assert.equal(beforeAnswer.code, 0, beforeAnswer.stderr);
+  assert.match(beforeAnswer.stdout, /ABANDONED identifier=shared-designer/);
+
+  const answer = await runCli(
+    [
+      "post",
+      "--type",
+      "answer",
+      "--reply-to",
+      String(questionSeq),
+      "--body",
+      "Yes. The designer answers under the designer identity.",
+    ],
+    repository,
+    designerEnvironment,
+  );
+  assert.equal(answer.code, 0, answer.stderr);
+  const afterAnswer = await runCli(
+    ["watch", "--once"],
+    repository,
+    implementerEnvironment,
+  );
+  assert.equal(afterAnswer.code, 0, afterAnswer.stderr);
+  assert.doesNotMatch(
+    afterAnswer.stdout,
+    /ABANDONED identifier=shared-designer/,
+  );
+
+  const explicit = await runCli(
+    [
+      "post",
+      "--identifier",
+      "explicit-agent",
+      "--role",
+      "implementer",
+      "--type",
+      "status",
+      "--body",
+      "Flags outrank the environment.",
+    ],
+    repository,
+    designerEnvironment,
+  );
+  assert.equal(explicit.code, 0, explicit.stderr);
+
+  const messages = store.listMessages("shared-identity", "shared-work");
+  assert.deepEqual(
+    messages.map(({ from }) => from),
+    ["shared-implementer", "shared-designer", "explicit-agent"],
+  );
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(repository, ".ao/config.json"), "utf8")),
+    repositoryConfig,
+  );
+});
+
+test("all active thread and document commands accept explicit identity flags", async () => {
+  store.createProject({ slug: "identity-flags", name: "Identity flags" });
+  store.createWork("identity-flags", {
+    slug: "flag-work",
+    title: "Flag work",
+  });
+  store.createDocument("identity-flags", {
+    kind: "context",
+    title: "Flag context",
+    body: "# Flag context\n",
+    author: "designer",
+  });
+  const repository = makeRepository("identity-flags-repository");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: serverUrl,
+        project: "identity-flags",
+        work: "flag-work",
+        identifier: "wrong-repository-default",
+        role: "designer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const identity = [
+    "--identifier",
+    "flag-agent",
+    "--role",
+    "implementer",
+  ];
+
+  for (const args of [
+    ["messages", ...identity],
+    ["watch", "--once", ...identity],
+    ["pull", ...identity],
+    ["push", "context", ...identity],
+  ]) {
+    const result = await runCli(args, repository);
+    assert.equal(result.code, 0, `${args[0]}: ${result.stderr}`);
+  }
+
+  const status = await runCli(
+    [
+      "post",
+      "--type",
+      "status",
+      "--body",
+      "Every command accepts explicit identity.",
+      ...identity,
+    ],
+    repository,
+  );
+  assert.equal(status.code, 0, status.stderr);
+  const question = await runCli(
+    [
+      "post",
+      "--type",
+      "question",
+      "--to",
+      "reviewer",
+      "--body",
+      "Close this explicit-identity question.",
+      ...identity,
+    ],
+    repository,
+  );
+  assert.equal(question.code, 0, question.stderr);
+  const close = await runCli(
+    ["close", String(JSON.parse(question.stdout).seq), ...identity],
+    repository,
+  );
+  assert.equal(close.code, 0, close.stderr);
+  const resolved = await runCli(["resolve", ...identity], repository);
+  assert.equal(resolved.code, 0, resolved.stderr);
+
+  const work = store.getWork("identity-flags", "flag-work");
+  const participant = work.participants.find(
+    ({ identifier }) => identifier === "flag-agent",
+  );
+  assert.equal(participant.role, "implementer");
+  assert.match(participant.last_heartbeat_at, /^2026-/);
+  assert.ok(
+    store
+      .listMessages("identity-flags", "flag-work")
+      .every(({ from }) => from === "flag-agent"),
+  );
 });
 
 test("delete CLI commands stay on the repository server and report protected cleanup", async () => {
@@ -703,6 +1061,100 @@ test("cold room join uses the declared slot, pulls context, and exposes the full
   assert.equal(noSlot.code, 2);
   assert.match(noSlot.stderr, /has no implementer slot/);
   assert.match(noSlot.stderr, /--identifier ID/);
+});
+
+test("join, inject, and design warn before replacing repository identity", async () => {
+  function writeExistingConfig(repository, identifier, role = "implementer") {
+    mkdirSync(join(repository, ".ao"), { recursive: true });
+    writeFileSync(
+      join(repository, ".ao/config.json"),
+      `${JSON.stringify(
+        {
+          server_url: serverUrl,
+          project: "sample",
+          work: "work-one",
+          identifier,
+          role,
+        },
+        null,
+        2,
+      )}\n`,
+      "utf8",
+    );
+  }
+
+  const joinRepository = makeRepository("identity-warning-join");
+  writeExistingConfig(joinRepository, "old-join-agent");
+  const joined = await runCli(
+    [
+      "join",
+      "sample/work-one",
+      "--repo",
+      joinRepository,
+      "--identifier",
+      "new-join-agent",
+      "--role",
+      "implementer",
+    ],
+    joinRepository,
+  );
+  assert.equal(joined.code, 0, joined.stderr);
+  assert.match(joined.stderr, /WARNING: ao join will overwrite agent identity/);
+  assert.match(
+    joined.stderr,
+    /identifier "old-join-agent" -> "new-join-agent"/,
+  );
+
+  const injectRepositoryPath = makeRepository("identity-warning-inject");
+  writeExistingConfig(injectRepositoryPath, "old-inject-agent");
+  const injected = await runCli(
+    [
+      "inject",
+      injectRepositoryPath,
+      "--server",
+      serverUrl,
+      "--project",
+      "sample",
+      "--work",
+      "work-one",
+      "--identifier",
+      "new-inject-agent",
+      "--role",
+      "implementer",
+    ],
+    temporaryDirectory,
+  );
+  assert.equal(injected.code, 0, injected.stderr);
+  assert.match(
+    injected.stderr,
+    /WARNING: ao inject will overwrite agent identity/,
+  );
+
+  const designRepository = makeRepository("identity-warning-design");
+  writeExistingConfig(designRepository, "old-design-agent");
+  const designed = await runCli(
+    [
+      "design",
+      "sample",
+      "--repo",
+      designRepository,
+      "--identifier",
+      "new-designer",
+      "--role",
+      "designer",
+      "--force",
+    ],
+    designRepository,
+  );
+  assert.equal(designed.code, 0, designed.stderr);
+  assert.match(
+    designed.stderr,
+    /WARNING: ao design will overwrite agent identity/,
+  );
+  assert.match(
+    designed.stderr,
+    /role "implementer" -> "designer"/,
+  );
 });
 
 test("designer cold start joins every work and creates missing projects for skeleton grilling", async () => {
@@ -1548,6 +2000,12 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(sessionSkill, /Begin the self-driven loop.*`ao watch --once`/s);
   assert.match(sessionSkill, /post a `status` start message/);
   assert.match(sessionSkill, /Never silently reuse an occupied implementer slot/);
+  assert.match(
+    sessionSkill,
+    /`--identifier` \/ `--role`.*`AO_IDENTIFIER` \/ `AO_ROLE`.*repository `\.ao\/config\.json`/s,
+  );
+  assert.match(sessionSkill, /Do not write identity into\s+`~\/\.ao\/config\.json`/);
+  assert.match(sessionSkill, /multiple\s+agents share one checkout/);
   const designerSkill = templateContents[1];
   assert.match(
     designerSkill,
@@ -1573,6 +2031,8 @@ test("service skill templates contain none of the retired file protocol", () => 
   );
   assert.match(designerSkill, /Only the owner can\s+dismiss participants/);
   assert.match(designerSkill, /Never guess owner-specific facts/);
+  assert.match(designerSkill, /`AO_IDENTIFIER=designer AO_ROLE=designer`/);
+  assert.match(designerSkill, /Never put identity\s+in the user-level/);
   const designerScript = resolve(
     "templates/skills/design-handoff/scripts/designer-start.mjs",
   );
