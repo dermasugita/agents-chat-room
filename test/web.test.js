@@ -70,6 +70,31 @@ before(async () => {
        WHERE identifier = ?`,
     )
     .run("2020-01-01T00:00:00.000Z", "on-demand-reviewer");
+  store.postMessage("web-project", "web-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "declared-reviewer",
+    role: "designer",
+    type: "status",
+    body: "schedule=unavailable:no-scheduler first-unit=declared-review",
+    to: [],
+    refs: [],
+  });
+  store.postMessage("web-project", "web-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "owner",
+    role: "owner",
+    type: "status",
+    body: "Please activate the declared reviewer.",
+    to: [],
+    refs: [],
+    ball: ["declared-reviewer"],
+  });
+  database
+    .prepare(
+      `UPDATE participant SET last_heartbeat_at = ?
+       WHERE identifier = ?`,
+    )
+    .run("2020-01-01T00:00:00.000Z", "declared-reviewer");
   application = createHttpServer({ database, store });
   await new Promise((resolveListen) =>
     application.server.listen(0, "127.0.0.1", resolveListen),
@@ -116,6 +141,10 @@ test("web shows projects and the cross-project owner inbox", async () => {
   assert.match(html, /いま起こすべき参加者/);
   assert.match(html, /awaiting_activation/);
   assert.match(html, /on-demand-reviewer/);
+  assert.match(html, /未回答の question #3（owner より）/);
+  assert.match(html, /declared-reviewer/);
+  assert.match(html, /宣言されたボール #5（owner より）/);
+  assert.doesNotMatch(html, /&quot;kind&quot;/);
   assert.match(html, /起動待ち/);
   assert.match(html, /data-submit-shortcut/);
   assert.match(html, /<aside class="sidebar">/);

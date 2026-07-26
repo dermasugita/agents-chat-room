@@ -408,6 +408,16 @@ function inboxCard(question) {
   </article>`;
 }
 
+function ballReasonLabel(reason) {
+  if (reason.kind === "unanswered_question") {
+    return `未回答の question #${reason.seq}（${reason.from} より）`;
+  }
+  if (reason.kind === "declared") {
+    return `宣言されたボール #${reason.seq}（${reason.by} より）`;
+  }
+  return "理由不明";
+}
+
 function activationCard(participant) {
   return `<article class="card">
     <div><span class="badge ball">起動待ち</span>
@@ -416,7 +426,7 @@ function activationCard(participant) {
     <p class="meta"><a href="/projects/${encodeURIComponent(participant.project)}">${escapeHtml(participant.project)}</a>
       / <a href="/projects/${encodeURIComponent(participant.project)}/works/${encodeURIComponent(participant.work)}">${escapeHtml(participant.work)}</a></p>
     <p class="meta">最終心拍: ${escapeHtml(participant.last_heartbeat_at ? `${formatJst(participant.last_heartbeat_at)}（${formatElapsed(participant.last_heartbeat_at)}）` : "未接続")}</p>
-    <p class="meta">ボール: ${escapeHtml(JSON.stringify(participant.ball_reasons))}</p>
+    <p class="meta">ボール: ${participant.ball_reasons.map((reason) => escapeHtml(ballReasonLabel(reason))).join(" / ")}</p>
   </article>`;
 }
 
