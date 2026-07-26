@@ -465,12 +465,41 @@ function documentPage(store, projectSlug, identifier, revision) {
 
 function participantRow(participant) {
   const badges = [
+    participant.expected ? '<span class="badge">担当枠</span>' : "",
+    participant.waiting ? '<span class="badge">参加待ち</span>' : "",
     participant.ball.has_ball ? '<span class="badge ball">ボールあり</span>' : "",
+    !participant.ball.has_ball ? '<span class="badge">ボールなし</span>' : "",
     participant.abandoned ? '<span class="badge danger">離脱</span>' : "",
   ].join("");
   return `<tr><td>${escapeHtml(participant.identifier)}</td><td>${escapeHtml(participant.role)}</td>
-    <td>${badges || '<span class="badge">ボールなし</span>'}</td>
+    <td>${badges}</td>
     <td class="meta">${escapeHtml(heartbeatLabel(participant))}</td></tr>`;
+}
+
+function participantsForDisplay(work) {
+  if (!work.expected_participant) {
+    return work.participants;
+  }
+  const expected = work.expected_participant;
+  const registered = work.participants.find(
+    ({ identifier }) => identifier === expected.identifier,
+  );
+  const expectedRow = registered
+    ? { ...registered, expected: true }
+    : {
+        ...expected,
+        expected: true,
+        waiting: true,
+        last_heartbeat_at: null,
+        ball: { has_ball: false, reasons: [] },
+        abandoned: false,
+      };
+  return [
+    expectedRow,
+    ...work.participants.filter(
+      ({ identifier }) => identifier !== expected.identifier,
+    ),
+  ];
 }
 
 function messageCard(message, projectSlug, workSlug) {
@@ -497,13 +526,14 @@ function messageCard(message, projectSlug, workSlug) {
 
 function workPage(store, projectSlug, slug) {
   const work = store.getWork(projectSlug, slug);
+  const participants = participantsForDisplay(work);
   return layout(
     work.title,
     `<p><a href="/projects/${encodeURIComponent(work.project)}">← プロジェクト</a></p>
      <h1>${escapeHtml(work.title)}</h1>
      <p class="meta">${escapeHtml(work.slug)} · <span class="badge">${escapeHtml(workStateLabel(work.state))}</span></p>
      <section class="card"><h2>参加者</h2><table><thead><tr><th>識別子</th><th>ロール</th><th>状態</th><th>最終心拍</th></tr></thead>
-       <tbody>${work.participants.map(participantRow).join("") || '<tr><td colspan="4">参加者はまだいません。</td></tr>'}</tbody></table></section>
+       <tbody>${participants.map(participantRow).join("") || '<tr><td colspan="4">参加者はまだいません。</td></tr>'}</tbody></table></section>
      <section><h2>会話</h2>${work.messages.map((message) => messageCard(message, projectSlug, slug)).join("") || '<p class="card">メッセージはまだありません。</p>'}</section>
      <section class="card"><h2>オーナーとして投稿</h2>
        <form method="post" action="/projects/${encodeURIComponent(projectSlug)}/works/${encodeURIComponent(slug)}/messages" data-owner-post-form>

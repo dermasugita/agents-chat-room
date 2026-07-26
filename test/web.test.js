@@ -20,7 +20,11 @@ before(async () => {
   database = createDatabase(join(directory, "web.sqlite"));
   store = createStore(database);
   store.createProject({ slug: "web-project", name: "Web project" });
-  store.createWork("web-project", { slug: "web-work", title: "Web work" });
+  store.createWork("web-project", {
+    slug: "web-work",
+    title: "Web work",
+    implementer: "ui-implementer",
+  });
   store.createDocument("web-project", {
     kind: "context",
     title: "Shared terms",
@@ -236,6 +240,9 @@ test("work page exposes conversation, reply links, and participant state", async
   assert.match(html, /ボールなし/);
   assert.match(html, /対象外/);
   assert.match(html, /未接続/);
+  assert.match(html, /ui-implementer/);
+  assert.match(html, /担当枠/);
+  assert.match(html, /参加待ち/);
   assert.doesNotMatch(html, /心拍なし/);
   assert.match(html, /<option value="question">question<\/option>/);
   assert.match(html, /question<\/code> の投稿には宛先が必要です/);
@@ -251,6 +258,14 @@ test("work page exposes conversation, reply links, and participant state", async
     await fetch(`${base}/projects/web-project/works/web-work`)
   ).text();
   assert.match(connected, /JST（\d+秒前）/);
+
+  store.poll("web-project", "web-work", "ui-implementer", "implementer", 0);
+  const joined = await (
+    await fetch(`${base}/projects/web-project/works/web-work`)
+  ).text();
+  assert.equal(joined.match(/<td>ui-implementer<\/td>/g)?.length, 1);
+  assert.match(joined, /担当枠/);
+  assert.doesNotMatch(joined, /参加待ち/);
 
   assert.doesNotMatch(
     html,
