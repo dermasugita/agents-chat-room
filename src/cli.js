@@ -14,6 +14,11 @@ import {
 import { homedir } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  compareVersions,
+  packageVersion,
+  releaseNotes,
+} from "./version.js";
 
 const COPY_MARKER = "AgentOrchestrator";
 const INSTRUCTION_START = "<!-- agents-chat-room:instructions:start -->";
@@ -26,11 +31,14 @@ const CLI_ENTRYPOINT = resolve(
   dirname(fileURLToPath(import.meta.url)),
   "../bin/ao.js",
 );
+const CLI_VERSION = packageVersion();
+const warnedServerVersions = new Set();
 
 const HELP = `agents-chat-room CLI
 
 Usage:
   ao configure --server URL
+  ao version [--notes]
   ao projects [--json]
   ao design <PROJECT> [--repo PATH] [--identifier ID] [--role designer]
   ao rooms [--json] [--repo PATH]
@@ -67,6 +75,7 @@ repository .ao/config.json. Identity belongs to an agent, not a repository.
 
 const CONTEXT_OPTIONS = ["repo", "work", "identifier", "role"];
 const COMMAND_OPTIONS = new Map([
+  ["version", ["notes"]],
   ["configure", ["server"]],
   ["projects", ["json", "repo"]],
   ["design", ["repo", "identifier", "role", "force"]],
@@ -526,11 +535,16 @@ function workApiPath(context, work) {
   return `/projects/${apiPath(context.config.project)}/works/${apiPath(work)}`;
 }
 
-async function pollWork(context, work, { heartbeat = true, since = 0 } = {}) {
+async function pollWork(
+  context,
+  work,
+  { heartbeat = true, since = 0, issuesSince = 0 } = {},
+) {
   const query = new URLSearchParams({
     as: context.config.identifier,
     role: context.config.role,
     since: String(since),
+    issues_since: String(issuesSince),
   });
   if (!heartbeat) {
     query.set("heartbeat", "false");
@@ -574,6 +588,17 @@ async function api(config, method, path, body = undefined) {
     });
   } catch (error) {
     throw new CliError(`Cannot reach ${base}: ${error.message}`);
+  }
+  const serverVersion = response.headers.get("x-agents-chat-room-version");
+  if (
+    serverVersion &&
+    compareVersions(CLI_VERSION, serverVersion) < 0 &&
+    !warnedServerVersions.has(serverVersion)
+  ) {
+    warnedServerVersions.add(serverVersion);
+    console.error(
+      `WARNING ao CLI ${CLI_VERSION} is older than server ${serverVersion}; update with node <package>/scripts/install-cli.mjs`,
+    );
   }
   let responseBody;
   try {
@@ -1846,7 +1871,37 @@ function messageLine(message) {
   return `MESSAGE seq=${message.seq} type=${message.type} from=${message.from} to=${message.to.join(",")} body=${body}`;
 }
 
+function issueLine(change) {
+  const issue = change.issue;
+  return `ISSUE project=${issue.project} number=${issue.number} change=${change.change} state=${issue.state} title=${JSON.stringify(issue.title)}`;
+}
+
+function issueCursor(state, context) {
+  state.issue_changes ??= {};
+  const projectCursors = state.issue_changes[context.config.project];
+  if (
+    projectCursors === null ||
+    typeof projectCursors !== "object" ||
+    Array.isArray(projectCursors)
+  ) {
+    state.issue_changes[context.config.project] = {};
+  }
+  const cursor = Number(
+    state.issue_changes[context.config.project][context.config.identifier] ?? 0,
+  );
+  return Number.isInteger(cursor) && cursor >= 0 ? cursor : 0;
+}
+
+function setIssueCursor(state, context, cursor) {
+  state.issue_changes ??= {};
+  state.issue_changes[context.config.project] ??= {};
+  state.issue_changes[context.config.project][context.config.identifier] = cursor;
+}
+
 function emitPoll(result, prefix = "") {
+  for (const issue of result.issues ?? []) {
+    console.log(`${prefix}${issueLine(issue)}`);
+  }
   for (const message of result.messages) {
     console.log(`${prefix}${messageLine(message)}`);
   }
@@ -1886,16 +1941,24 @@ async function watch(context, parsed) {
   if (!Number.isInteger(since) || since < 0) {
     throw new CliError("--since must be a non-negative integer");
   }
+  const state = readJson(context.statePath, { documents: {} });
+  let issuesSince = issueCursor(state, context);
   let failures = 0;
   while (true) {
     try {
       const result = await pollWork(context, work, {
         heartbeat: once,
         since,
+        issuesSince,
       });
       emitPoll(result);
       if (result.messages.length > 0) {
         since = result.messages.at(-1).seq;
+      }
+      if (Number.isInteger(result.issue_cursor) && result.issue_cursor >= issuesSince) {
+        issuesSince = result.issue_cursor;
+        setIssueCursor(state, context, issuesSince);
+        writeJson(context.statePath, state);
       }
       failures = 0;
     } catch (error) {
@@ -1937,6 +2000,18 @@ async function watchProject(context, parsed) {
       );
       const state = readJson(context.statePath, { documents: {} });
       state.project_messages ??= {};
+      const issueSince = issueCursor(state, context);
+      const issueResult = await api(
+        context.config,
+        "GET",
+        `/projects/${apiPath(context.config.project)}/issue-changes?since=${
+          issueSince
+        }`,
+      );
+      for (const issue of issueResult.issues) {
+        console.log(issueLine(issue));
+      }
+      setIssueCursor(state, context, issueResult.issue_cursor);
       const results = await Promise.all(
         project.works.map(async (work) => {
           const since =
@@ -1948,6 +2023,7 @@ async function watchProject(context, parsed) {
             result: await pollWork(context, work.slug, {
               heartbeat: once,
               since,
+              issuesSince: issueResult.issue_cursor,
             }),
           };
         }),
@@ -1962,7 +2038,7 @@ async function watchProject(context, parsed) {
           `PROJECT_WORK project=${context.config.project} work=${work.slug} heartbeat=${result.heartbeat_at ?? "none"} ball=${result.your_ball.has_ball} idle=${result.idle_nudge !== null} abandoned=${result.abandoned.length} awaiting_activation=${(result.awaiting_activation ?? []).length}`,
         );
         emitPoll(
-          result,
+          { ...result, issues: [] },
           `WORK project=${context.config.project} work=${work.slug} `,
         );
         if (result.messages.length > 0 && explicitSince === undefined) {
@@ -1999,6 +2075,15 @@ export async function main(argv) {
     return;
   }
   assertKnownOptions(command, parsed);
+
+  if (command === "version") {
+    if (hasOption(parsed, "notes")) {
+      process.stdout.write(`${releaseNotes()}\n`);
+    } else {
+      process.stdout.write(`${CLI_VERSION}\n`);
+    }
+    return;
+  }
 
   if (command === "inject") {
     print(await inject(parsed));

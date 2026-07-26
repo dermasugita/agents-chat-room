@@ -555,6 +555,45 @@ export function createStore(database, options = {}) {
     return comment;
   }
 
+  function recordIssueChange(projectId, issueRow, changeType) {
+    const changedAt = now();
+    const issue = serializeIssue(issueRow);
+    database
+      .prepare(
+        `INSERT INTO issue_change(
+           project_id, issue_id, change_type, issue_json, changed_at
+         ) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(projectId, issueRow.id, changeType, JSON.stringify(issue), changedAt);
+  }
+
+  function issueChanges(projectSlug, since = 0) {
+    const project = projectBySlug(projectSlug);
+    assert(
+      Number.isInteger(since) && since >= 0,
+      400,
+      "invalid_request",
+      "issues_since must be a non-negative integer",
+    );
+    const rows = database
+      .prepare(
+        `SELECT id, change_type, issue_json, changed_at
+         FROM issue_change
+         WHERE project_id = ? AND id > ?
+         ORDER BY id`,
+      )
+      .all(project.id, since);
+    return {
+      issues: rows.map((row) => ({
+        cursor: Number(row.id),
+        change: row.change_type,
+        changed_at: row.changed_at,
+        issue: JSON.parse(row.issue_json),
+      })),
+      issue_cursor: rows.length > 0 ? Number(rows.at(-1).id) : since,
+    };
+  }
+
   function createIssue(projectSlug, input) {
     const project = projectBySlug(projectSlug);
     assert(
@@ -595,7 +634,9 @@ export function createStore(database, options = {}) {
           identity.origin_work,
           now(),
         );
-      return serializeIssue(issueByNumber(projectSlug, number));
+      const issue = issueByNumber(projectSlug, number);
+      recordIssueChange(project.id, issue, "created");
+      return serializeIssue(issue);
     });
   }
 
@@ -704,19 +745,23 @@ export function createStore(database, options = {}) {
       "issue_already_closed",
       `Issue is already closed: ${projectSlug}#${issue.number}`,
     );
-    database
-      .prepare(
-        `UPDATE issue
-         SET state = 'closed', closed_at = ?, closed_by = ?, close_reason = ?
-         WHERE id = ?`,
-      )
-      .run(
-        now(),
-        `${identity.origin_project}/${identity.origin_identifier}`,
-        input.reason.trim(),
-        issue.id,
-      );
-    return getIssue(projectSlug, issue.number);
+    return inTransaction(database, () => {
+      database
+        .prepare(
+          `UPDATE issue
+           SET state = 'closed', closed_at = ?, closed_by = ?, close_reason = ?
+           WHERE id = ?`,
+        )
+        .run(
+          now(),
+          `${identity.origin_project}/${identity.origin_identifier}`,
+          input.reason.trim(),
+          issue.id,
+        );
+      const changed = issueByNumber(projectSlug, issue.number);
+      recordIssueChange(changed.project_id, changed, "closed");
+      return getIssue(projectSlug, issue.number);
+    });
   }
 
   function reopenIssue(projectSlug, requestedNumber) {
@@ -727,14 +772,18 @@ export function createStore(database, options = {}) {
       "issue_already_open",
       `Issue is already open: ${projectSlug}#${issue.number}`,
     );
-    database
-      .prepare(
-        `UPDATE issue
-         SET state = 'open', closed_at = NULL, closed_by = NULL, close_reason = NULL
-         WHERE id = ?`,
-      )
-      .run(issue.id);
-    return getIssue(projectSlug, issue.number);
+    return inTransaction(database, () => {
+      database
+        .prepare(
+          `UPDATE issue
+           SET state = 'open', closed_at = NULL, closed_by = NULL, close_reason = NULL
+           WHERE id = ?`,
+        )
+        .run(issue.id);
+      const changed = issueByNumber(projectSlug, issue.number);
+      recordIssueChange(changed.project_id, changed, "reopened");
+      return getIssue(projectSlug, issue.number);
+    });
   }
 
   function health() {
@@ -879,6 +928,7 @@ export function createStore(database, options = {}) {
       revisions: 0,
       issues: 0,
       issue_comments: 0,
+      issue_changes: 0,
       message_recipients: 0,
       message_refs: 0,
       message_expectations: 0,
@@ -1073,6 +1123,10 @@ export function createStore(database, options = {}) {
       const workIds = "SELECT id FROM work WHERE project_id = ?";
       const issueIds = "SELECT id FROM issue WHERE project_id = ?";
 
+      deleted.issue_changes = deletedRows(
+        "DELETE FROM issue_change WHERE project_id = ?",
+        project.id,
+      );
       deleted.issue_comments = deletedRows(
         `DELETE FROM issue_comment WHERE issue_id IN (${issueIds})`,
         project.id,
@@ -1750,6 +1804,7 @@ export function createStore(database, options = {}) {
     role = undefined,
     since = 0,
     heartbeat = true,
+    issuesSince = 0,
   ) {
     const work = workBySlug(projectSlug, workSlug);
     assert(typeof identifier === "string" && identifier, 400, "invalid_request", "as is required");
@@ -1767,6 +1822,12 @@ export function createStore(database, options = {}) {
       400,
       "invalid_request",
       "heartbeat must be a boolean",
+    );
+    assert(
+      Number.isInteger(issuesSince) && issuesSince >= 0,
+      400,
+      "invalid_request",
+      "issues_since must be a non-negative integer",
     );
     const participant = database
       .prepare("SELECT role FROM participant WHERE work_id = ? AND identifier = ?")
@@ -1828,6 +1889,7 @@ export function createStore(database, options = {}) {
 
     return {
       messages: listMessages(projectSlug, workSlug, since),
+      ...issueChanges(projectSlug, issuesSince),
       your_ball: yourBall,
       idle_nudge: idle
         ? "No participant has acted for 5 minutes and you do not hold the ball. Re-check the work state or ask who should act next."
@@ -2449,6 +2511,7 @@ export function createStore(database, options = {}) {
     getWork,
     health,
     inbox,
+    issueChanges,
     importBundle,
     listDocuments,
     listIssues,

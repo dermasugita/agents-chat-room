@@ -48,6 +48,18 @@ test("CLI installer copies the complete runtime and smoke-tests rooms and join",
     );
     const result = JSON.parse(stdout);
     assert.equal(result.installed, destination);
+    assert.equal(result.shim, join(directory, "home", ".local", "bin", "ao"));
+    assert.equal(existsSync(result.shim), true);
+    assert.notEqual(statSync(result.shim).mode & 0o111, 0);
+    assert.equal(realpathSync(result.shim), realpathSync(join(destination, "bin", "ao.js")));
+    const shimVersion = await execFileAsync(result.shim, ["version"], {
+      cwd: directory,
+      env: { ...process.env, HOME: join(directory, "home") },
+    });
+    assert.equal(
+      shimVersion.stdout.trim(),
+      JSON.parse(readFileSync(resolve("package.json"), "utf8")).version,
+    );
     assert.equal(result.smoke.rooms, 1);
     assert.equal(result.smoke.joined, "install-smoke/join-check");
     assert.equal(
@@ -58,8 +70,11 @@ test("CLI installer copies the complete runtime and smoke-tests rooms and join",
     for (const path of [
       "bin/ao.js",
       "src/cli.js",
+      "src/version.js",
+      "CHANGELOG.md",
       "templates/skills/session-chat/SKILL.md",
       "templates/skills/session-chat/scripts/join-room.mjs",
+      "templates/skills/session-chat/scripts/codex-implementer-monitor.sh",
     ]) {
       assert.equal(existsSync(join(destination, path)), true, path);
     }

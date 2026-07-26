@@ -3,15 +3,18 @@ import { pathToFileURL } from "node:url";
 import { createDatabase } from "./db.js";
 import { AppError } from "./errors.js";
 import { createStore } from "./store.js";
+import { packageVersion } from "./version.js";
 import { routeWeb } from "./web.js";
 
 const DEFAULT_PORT = 7331;
 const MAX_BODY_BYTES = 5 * 1024 * 1024;
+const SERVER_VERSION = packageVersion();
 
 function json(response, status, body, headers = {}) {
   response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
+    "x-agents-chat-room-version": SERVER_VERSION,
     ...headers,
   });
   response.end(JSON.stringify(body));
@@ -80,7 +83,7 @@ async function routeApi(request, response, url, store) {
   const path = url.pathname;
 
   if (method === "GET" && (path === "/health" || path === "/api/v1/health")) {
-    json(response, 200, store.health());
+    json(response, 200, { ...store.health(), version: SERVER_VERSION });
     return true;
   }
 
@@ -154,6 +157,21 @@ async function routeApi(request, response, url, store) {
       json(response, 201, store.createIssue(project, await readJson(request)));
       return true;
     }
+  }
+
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/issue-changes$/,
+  );
+  if (match && method === "GET") {
+    json(
+      response,
+      200,
+      store.issueChanges(
+        decode(match[1]),
+        integerQuery(url, "since"),
+      ),
+    );
+    return true;
   }
 
   match = path.match(
@@ -408,6 +426,7 @@ async function routeApi(request, response, url, store) {
         url.searchParams.get("role"),
         integerQuery(url, "since"),
         booleanQuery(url, "heartbeat"),
+        integerQuery(url, "issues_since"),
       ),
     );
     return true;
