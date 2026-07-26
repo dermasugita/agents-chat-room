@@ -1998,6 +1998,25 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
   assert.deepEqual(optionMessage.refs, ["context"]);
   assert.deepEqual(optionMessage.expects, [{ doc: "context", revision: 1 }]);
   assert.deepEqual(optionMessage.ball, ["built-in-agent"]);
+  assert.equal(store.ballFor(1, "built-in-agent").has_ball, true);
+
+  const releasedBall = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    [
+      "--type",
+      "status",
+      "--body",
+      "宣言したボールを空のフラグで解除",
+      "--ball",
+      "",
+    ],
+    repository,
+    noAdditionalCliSetup,
+  );
+  assert.equal(releasedBall.code, 0, releasedBall.stderr);
+  const releaseMessage = store.listMessages("sample", "work-one").at(-1);
+  assert.deepEqual(releaseMessage.ball, []);
+  assert.equal(store.ballFor(1, "built-in-agent").has_ball, false);
 
   const since = store.listMessages("sample", "work-one").at(-1).seq;
   store.postMessage("sample", "work-one", {
@@ -2418,6 +2437,8 @@ test("service skill templates contain none of the retired file protocol", () => 
     sessionSkill,
     /Do not declare another participant's ball on an informational `status`/,
   );
+  assert.match(sessionSkill, /hand a ball back with `--ball ''`/i);
+  assert.match(sessionSkill, /ao post --type status --ball ''/);
   assert.match(
     sessionSkill,
     /Committing and pushing to your own work branch are pre-authorized/,
@@ -2490,6 +2511,7 @@ test("service skill templates contain none of the retired file protocol", () => 
     designerSkill,
     /Do not declare another participant's ball on an informational `status`/,
   );
+  assert.match(designerSkill, /hand the ball\s+back with `--ball ''`/i);
   assert.match(
     designerSkill,
     /identifier=<id> project=<slug> works=<n> schedule=<registered\|unavailable:<reason>> first-unit=<what>/,
