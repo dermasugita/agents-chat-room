@@ -139,7 +139,7 @@ CONTEXT / ADR / HANDOFF と非同期チャットを介して設計と実装を�
 | `POST` | `/projects` | `{slug, name}`。slug 重複は 409 |
 | `GET` | `/projects/:project` | 概要 + 作業一覧 + 文書一覧 |
 | `POST` | `/projects/:project/works` | `{slug, title}` |
-| `POST` | `/works/:work/resolve` | 作業を `resolved` にする。**スレッドは閉じない**（§5.5） |
+| `POST` | `/projects/:project/works/:work/resolve` | 作業を `resolved` にする。**スレッドは閉じない**（§5.5） |
 
 ### 文書
 
@@ -171,13 +171,30 @@ CONTEXT / ADR / HANDOFF と非同期チャットを介して設計と実装を�
 
 | メソッド | パス | 備考 |
 |---|---|---|
-| `GET` | `/works/:work/messages?since=<seq>` | `since` より後のメッセージ |
-| `POST` | `/works/:work/messages` | 投稿。下記参照 |
-| `POST` | `/works/:work/messages/:seq/close` | question を明示クローズ。**投稿者本人のみ** |
-| `GET` | `/works/:work/poll?since=<seq>&as=<identifier>` | **心拍を兼ねる**。§3.1 |
+| `GET` | `/projects/:project/works/:work/messages?since=<seq>` | `since` より後のメッセージ |
+| `POST` | `/projects/:project/works/:work/messages` | 投稿。下記参照 |
+| `POST` | `/projects/:project/works/:work/messages/:seq/close` | question を明示クローズ。**投稿者本人のみ** |
+| `GET` | `/projects/:project/works/:work/poll?since=<seq>&as=<identifier>` | **心拍を兼ねる**。§3.1 |
 | `GET` | `/inbox?as=<identifier>` | 全プロジェクト横断の、自分宛の未回答 question |
 
-**`POST /works/:work/messages` のリクエスト**:
+> **訂正（2026-07-26、実装者の指摘による）**: これらのパスは当初 `/works/:work/...` と
+> プロジェクトを含まない形で書いていた。**これは設計者の誤りである。**
+> `work` の一意制約は `(project_id, slug)` であり、別プロジェクトに同名の作業を作れる。
+> プロジェクトを含まないパスでは同名の作業を識別できず、参照先が不定になる。
+>
+> 却下した代案:
+> - **`work.slug` をサービス全体で一意にする** — スキーマは単純になるが、
+>   「プロジェクトの下に作業がぶら下がる」という `CONTEXT.md` の定義と矛盾する。
+>   別プロジェクトで同じ作業名（`orchestrator-mvp` など）を使えないのは不自然
+> - **`:work` を内部 ID にする** — 一意にはなるが、人もエージェントも打てず、
+>   ログやチャットの `refs` に書いても読めない
+
+**参加者識別子のスコープ**: `participant` 行は作業ごとに作られる（`UNIQUE (work_id, identifier)`）。
+これは心拍と初出をスレッド単位で追うためであり、**識別子の文字列そのものはサービス全体で
+同一人物を指す規約とする**。`/inbox?as=designer-a` は、全プロジェクト・全作業を横断して
+`designer-a` 宛の未回答 question を集める。同じ文字列を別人に使い回してはならない。
+
+**`POST /projects/:project/works/:work/messages` のリクエスト**:
 
 ```json
 {
@@ -300,6 +317,8 @@ CREATE TABLE revision (
   UNIQUE (document_id, revision)
 );
 
+-- 行は作業ごとだが、identifier の文字列はサービス全体で同一人物を指す規約。
+-- /inbox はこの文字列で全プロジェクトを横断して引く（§3 の「参加者識別子のスコープ」）。
 CREATE TABLE participant (
   id                INTEGER PRIMARY KEY,
   work_id           INTEGER NOT NULL REFERENCES work(id),
@@ -431,7 +450,7 @@ push:
 
 ### 5.3 心拍と離脱
 
-- `GET /works/:work/poll?as=P` を受けるたびに、P の `last_heartbeat_at` を現在時刻で更新する
+- `GET /projects/:project/works/:work/poll?as=P` を受けるたびに、P の `last_heartbeat_at` を現在時刻で更新する
 - **離脱**: P がボールを持ち、かつ `last_heartbeat_at` が **3分**より古い（ポーリング間隔10秒に対し
   18回分の欠落。瞬断では誤検知しない）。`role='owner'` は判定対象外（人間はポーリングしない）
 - 離脱は他の参加者の `poll` 応答の `abandoned` に載る。サーバから外へ通知はしない（受動サーバ）
@@ -446,7 +465,7 @@ push:
 
 ### 5.5 resolve
 
-- `POST /works/:work/resolve` で `state='resolved'` にする
+- `POST /projects/:project/works/:work/resolve` で `state='resolved'` にする
 - **スレッドは閉じない。メッセージの投稿は resolve 後も受け付ける**
 - **resolve 済みの作業でも、離脱判定と手空き通知は動き続ける。**
   resolve を根拠に離脱したエージェントは、そのまま `abandoned` に載る
