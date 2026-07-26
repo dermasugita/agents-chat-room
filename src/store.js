@@ -223,6 +223,18 @@ export function createStore(database, options = {}) {
       .run(workId, identifier, role, seenAt);
   }
 
+  function touchParticipant(workId, identifier, role, seenAt) {
+    registerParticipant(workId, identifier, role, seenAt);
+    if (role !== "owner") {
+      database
+        .prepare(
+          `UPDATE participant SET last_heartbeat_at = ?
+           WHERE work_id = ? AND identifier = ?`,
+        )
+        .run(seenAt, workId, identifier);
+    }
+  }
+
   function ballFor(workId, identifier) {
     const unanswered = database
       .prepare(
@@ -737,7 +749,7 @@ export function createStore(database, options = {}) {
         "expects cannot repeat a document",
       );
 
-      registerParticipant(work.id, input.from, input.role, createdAt);
+      touchParticipant(work.id, input.from, input.role, createdAt);
       const seq = database
         .prepare(
           "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM message WHERE work_id = ?",
@@ -837,6 +849,7 @@ export function createStore(database, options = {}) {
     identifier,
     role = undefined,
     since = 0,
+    heartbeat = true,
   ) {
     const work = workBySlug(projectSlug, workSlug);
     assert(typeof identifier === "string" && identifier, 400, "invalid_request", "as is required");
@@ -848,6 +861,12 @@ export function createStore(database, options = {}) {
       400,
       "invalid_request",
       "since must be a non-negative integer",
+    );
+    assert(
+      typeof heartbeat === "boolean",
+      400,
+      "invalid_request",
+      "heartbeat must be a boolean",
     );
     const participant = database
       .prepare("SELECT role FROM participant WHERE work_id = ? AND identifier = ?")
@@ -869,18 +888,20 @@ export function createStore(database, options = {}) {
       },
     );
     const effectiveRole = participant?.role ?? role;
-    const heartbeatAt = now();
+    const polledAt = now();
     inTransaction(database, () => {
-      registerParticipant(work.id, identifier, effectiveRole, heartbeatAt);
-      if (effectiveRole !== "owner") {
-        database
-          .prepare(
-            `UPDATE participant SET last_heartbeat_at = ?
-             WHERE work_id = ? AND identifier = ?`,
-          )
-          .run(heartbeatAt, work.id, identifier);
+      if (heartbeat) {
+        touchParticipant(work.id, identifier, effectiveRole, polledAt);
+      } else {
+        registerParticipant(work.id, identifier, effectiveRole, polledAt);
       }
     });
+    const heartbeatAt = database
+      .prepare(
+        `SELECT last_heartbeat_at
+         FROM participant WHERE work_id = ? AND identifier = ?`,
+      )
+      .get(work.id, identifier).last_heartbeat_at;
 
     const yourBall = ballFor(work.id, identifier);
     const latest = database
@@ -906,7 +927,7 @@ export function createStore(database, options = {}) {
         : null,
       abandoned,
       stale_expectations: staleExpectations(work.id, identifier),
-      heartbeat_at: effectiveRole === "owner" ? null : heartbeatAt,
+      heartbeat_at: heartbeatAt,
     };
   }
 

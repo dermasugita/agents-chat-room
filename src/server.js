@@ -49,6 +49,24 @@ function integerQuery(url, name, fallback = 0) {
   return value;
 }
 
+function booleanQuery(url, name, fallback = true) {
+  const raw = url.searchParams.get(name);
+  if (raw === null) {
+    return fallback;
+  }
+  if (raw === "true") {
+    return true;
+  }
+  if (raw === "false") {
+    return false;
+  }
+  throw new AppError(
+    400,
+    "invalid_request",
+    `${name} must be true or false`,
+  );
+}
+
 function decode(value) {
   try {
     return decodeURIComponent(value);
@@ -215,6 +233,7 @@ async function routeApi(request, response, url, store) {
         url.searchParams.get("as"),
         url.searchParams.get("role"),
         integerQuery(url, "since"),
+        booleanQuery(url, "heartbeat"),
       ),
     );
     return true;

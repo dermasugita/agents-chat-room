@@ -278,6 +278,100 @@ test("a participant with the ball and a stale heartbeat is abandoned", () => {
   );
 });
 
+test("passive polls never refresh heartbeat and cannot hide abandonment", () => {
+  post("work-one", {
+    type: "question",
+    body: "A background watcher must not hide this ball",
+    to: ["watch-only"],
+  });
+
+  const first = store.poll(
+    "sample",
+    "work-one",
+    "watch-only",
+    "implementer",
+    0,
+    false,
+  );
+  assert.equal(first.heartbeat_at, null);
+  const firstSeen = store
+    .participantStates(1)
+    .find(({ identifier }) => identifier === "watch-only").first_seen_at;
+
+  currentTime = new Date(currentTime.getTime() + 2 * 60_000);
+  const second = store.poll(
+    "sample",
+    "work-one",
+    "watch-only",
+    "implementer",
+    0,
+    false,
+  );
+  assert.equal(second.heartbeat_at, null);
+  assert.equal(
+    store
+      .participantStates(1)
+      .find(({ identifier }) => identifier === "watch-only").first_seen_at,
+    firstSeen,
+  );
+
+  currentTime = new Date(currentTime.getTime() + 60_001);
+  store.poll(
+    "sample",
+    "work-one",
+    "watch-only",
+    "implementer",
+    0,
+    false,
+  );
+  const observer = store.poll(
+    "sample",
+    "work-one",
+    "designer",
+    "designer",
+    0,
+  );
+  assert.equal(observer.abandoned.length, 1);
+  assert.equal(observer.abandoned[0].identifier, "watch-only");
+  assert.equal(observer.abandoned[0].last_heartbeat_at, null);
+});
+
+test("active post and poll update attention heartbeat", () => {
+  post("work-one", {
+    from: "active-impl",
+    role: "implementer",
+    body: "active post",
+  });
+  assert.equal(
+    store
+      .participantStates(1)
+      .find(({ identifier }) => identifier === "active-impl")
+      .last_heartbeat_at,
+    "2026-07-26T00:00:00.000Z",
+  );
+
+  currentTime = new Date(currentTime.getTime() + 1_000);
+  const passive = store.poll(
+    "sample",
+    "work-one",
+    "active-impl",
+    "implementer",
+    0,
+    false,
+  );
+  assert.equal(passive.heartbeat_at, "2026-07-26T00:00:00.000Z");
+
+  currentTime = new Date(currentTime.getTime() + 1_000);
+  const active = store.poll(
+    "sample",
+    "work-one",
+    "active-impl",
+    "implementer",
+    0,
+  );
+  assert.equal(active.heartbeat_at, "2026-07-26T00:00:02.000Z");
+});
+
 test("poll infers an existing role, requires one for registration, and reports conflicts", async () => {
   post("work-one", { body: "register designer" });
 
@@ -315,6 +409,14 @@ test("poll infers an existing role, requires one for registration, and reports c
     );
     assert.equal(registered.status, 200);
     assert.match(registered.body.heartbeat_at, /^2026-07-26T/);
+
+    const invalidHeartbeat = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/works/work-one/poll?as=designer&heartbeat=maybe",
+    );
+    assert.equal(invalidHeartbeat.status, 400);
+    assert.match(invalidHeartbeat.body.message, /heartbeat must be true or false/);
   });
 });
 

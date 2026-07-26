@@ -6,6 +6,7 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -67,6 +68,67 @@ async function runCli(args, cwd) {
   }
 }
 
+async function runPersistentCli(args, cwd, timeout = 250) {
+  try {
+    await execFileAsync(process.execPath, [cliPath, ...args], {
+      cwd,
+      env: { ...process.env },
+      maxBuffer: 5 * 1024 * 1024,
+      timeout,
+    });
+    assert.fail("persistent CLI unexpectedly exited");
+  } catch (error) {
+    assert.equal(error.killed, true, error.stderr);
+  }
+}
+
+async function runNodeScript(script, args, cwd, env = {}) {
+  try {
+    const result = await execFileAsync(process.execPath, [script, ...args], {
+      cwd,
+      env: { ...process.env, ...env },
+      maxBuffer: 5 * 1024 * 1024,
+    });
+    return { ...result, code: 0 };
+  } catch (error) {
+    return {
+      code: error.code,
+      killed: error.killed,
+      stderr: error.stderr,
+      stdout: error.stdout,
+    };
+  }
+}
+
+async function runTimedNodeScript(script, args, cwd, env = {}, timeout = 250) {
+  try {
+    await execFileAsync(process.execPath, [script, ...args], {
+      cwd,
+      env: { ...process.env, ...env },
+      maxBuffer: 5 * 1024 * 1024,
+      timeout,
+    });
+    assert.fail("persistent script unexpectedly exited");
+  } catch (error) {
+    assert.equal(error.killed, true, error.stderr);
+    return {
+      stderr: error.stderr ?? "",
+      stdout: error.stdout ?? "",
+    };
+  }
+}
+
+function heartbeatFor(identifier) {
+  return store
+    .getWork("sample", "work-one")
+    .participants.find((participant) => participant.identifier === identifier)
+    ?.last_heartbeat_at;
+}
+
+async function waitForClockTick() {
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+}
+
 function makeRepository(name) {
   const path = join(temporaryDirectory, name);
   mkdirSync(path, { recursive: true });
@@ -107,6 +169,14 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
     ".ao/docs/CONTEXT.md",
     ".claude/skills/session-chat/SKILL.md",
     ".agents/skills/session-chat/SKILL.md",
+    ".claude/skills/session-chat/scripts/post-safe.mjs",
+    ".agents/skills/session-chat/scripts/post-safe.mjs",
+    ".claude/skills/session-chat/scripts/watch-passive.mjs",
+    ".agents/skills/session-chat/scripts/watch-passive.mjs",
+    ".claude/skills/session-chat/scripts/self-driven-loop.mjs",
+    ".agents/skills/session-chat/scripts/self-driven-loop.mjs",
+    ".claude/skills/session-chat/scripts/ball-check.mjs",
+    ".agents/skills/session-chat/scripts/ball-check.mjs",
     "CLAUDE.md",
     "AGENTS.md",
   ]) {
@@ -122,6 +192,26 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
       "utf8",
     ),
   );
+  for (const script of [
+    "post-safe.mjs",
+    "watch-passive.mjs",
+    "self-driven-loop.mjs",
+    "ball-check.mjs",
+  ]) {
+    const claude = join(
+      repository,
+      ".claude/skills/session-chat/scripts",
+      script,
+    );
+    const agents = join(
+      repository,
+      ".agents/skills/session-chat/scripts",
+      script,
+    );
+    assert.equal(readFileSync(claude, "utf8"), readFileSync(agents, "utf8"));
+    assert.notEqual(statSync(claude).mode & 0o111, 0, script);
+    assert.notEqual(statSync(agents).mode & 0o111, 0, script);
+  }
   assert.match(readFileSync(join(repository, ".gitignore"), "utf8"), /^\/\.ao\/$/m);
   assert.match(
     readFileSync(join(repository, ".ao/docs/CONTEXT.md"), "utf8"),
@@ -271,6 +361,234 @@ test("watch emits each message as one distinguishable line", async () => {
   assert.match(messageLine, /line one\\nline two/);
 });
 
+test("active CLI commands refresh heartbeat while persistent watch does not", async () => {
+  const repository = makeRepository("heartbeat-cli");
+  await injectRepository(repository, "heartbeat-cli");
+
+  const messages = await runCli(["messages"], repository);
+  assert.equal(messages.code, 0, messages.stderr);
+  const afterMessages = heartbeatFor("heartbeat-cli");
+  assert.match(afterMessages, /^\d{4}-/);
+
+  store.postMessage("sample", "work-one", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "question",
+    body: "Keep the ball while the passive watcher runs",
+    to: ["heartbeat-cli"],
+    refs: [],
+  });
+  await waitForClockTick();
+  await runPersistentCli(["watch", "--interval", "0.01"], repository);
+  assert.equal(heartbeatFor("heartbeat-cli"), afterMessages);
+
+  await waitForClockTick();
+  const once = await runCli(["watch", "--once"], repository);
+  assert.equal(once.code, 0, once.stderr);
+  const afterOnce = heartbeatFor("heartbeat-cli");
+  assert.ok(afterOnce > afterMessages);
+
+  await waitForClockTick();
+  const pulled = await runCli(["pull"], repository);
+  assert.equal(pulled.code, 0, pulled.stderr);
+  const afterPull = heartbeatFor("heartbeat-cli");
+  assert.ok(afterPull > afterOnce);
+
+  const copy = join(repository, ".ao/docs/CONTEXT.md");
+  writeFileSync(
+    copy,
+    `${readFileSync(copy, "utf8")}\nHeartbeat push edit.\n`,
+    "utf8",
+  );
+  await waitForClockTick();
+  const pushed = await runCli(["push", "context"], repository);
+  assert.equal(pushed.code, 0, pushed.stderr);
+  const afterPush = heartbeatFor("heartbeat-cli");
+  assert.ok(afterPush > afterPull);
+
+  await waitForClockTick();
+  const posted = await runCli(
+    ["post", "--type", "status", "--body", "active post heartbeat"],
+    repository,
+  );
+  assert.equal(posted.code, 0, posted.stderr);
+  const afterPost = heartbeatFor("heartbeat-cli");
+  assert.ok(afterPost > afterPush);
+
+  await waitForClockTick();
+  const question = await runCli(
+    [
+      "post",
+      "--type",
+      "question",
+      "--to",
+      "designer",
+      "--body",
+      "close heartbeat question",
+    ],
+    repository,
+  );
+  assert.equal(question.code, 0, question.stderr);
+  const questionSeq = JSON.parse(question.stdout).seq;
+  const afterQuestion = heartbeatFor("heartbeat-cli");
+
+  await waitForClockTick();
+  const closed = await runCli(["close", String(questionSeq)], repository);
+  assert.equal(closed.code, 0, closed.stderr);
+  const afterClose = heartbeatFor("heartbeat-cli");
+  assert.ok(afterClose > afterQuestion);
+
+  await waitForClockTick();
+  const resolved = await runCli(["resolve"], repository);
+  assert.equal(resolved.code, 0, resolved.stderr);
+  assert.ok(heartbeatFor("heartbeat-cli") > afterClose);
+});
+
+test("injected built-in scripts validate, monitor Japanese, loop, and check ball", async () => {
+  const repository = makeRepository("built-in-scripts");
+  await injectRepository(repository, "built-in-agent");
+  const scriptRoot = join(
+    repository,
+    ".agents/skills/session-chat/scripts",
+  );
+  const scriptEnvironment = { AO_CLI: cliPath };
+
+  const invalidAnswer = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    ["--type", "answer", "--body", "missing reply"],
+    repository,
+    { AO_CLI: "/path/that/must/not/be-started" },
+  );
+  assert.equal(invalidAnswer.code, 64);
+  assert.match(invalidAnswer.stderr, /answer requires a positive --reply-to/);
+  assert.match(invalidAnswer.stderr, /request was not sent/);
+
+  const invalidQuestion = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    ["--type", "question", "--body", "missing recipient"],
+    repository,
+    { AO_CLI: "/path/that/must/not/be-started" },
+  );
+  assert.equal(invalidQuestion.code, 64);
+  assert.match(invalidQuestion.stderr, /question requires at least one --to/);
+  assert.match(invalidQuestion.stderr, /request was not sent/);
+
+  const failingCli = join(repository, "failing-ao.mjs");
+  writeFileSync(
+    failingCli,
+    'process.stderr.write("DOWNSTREAM_FAILURE\\n"); process.exit(23);\n',
+    "utf8",
+  );
+  const downstreamFailure = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    ["--type", "status", "--body", "preserve the CLI exit code"],
+    repository,
+    { AO_CLI: failingCli },
+  );
+  assert.equal(downstreamFailure.code, 23);
+  assert.match(downstreamFailure.stderr, /DOWNSTREAM_FAILURE/);
+
+  const posted = await runNodeScript(
+    join(scriptRoot, "post-safe.mjs"),
+    [
+      "--type",
+      "question",
+      "--to",
+      "designer",
+      "--body",
+      "日本語の投稿ラッパ確認",
+    ],
+    repository,
+    scriptEnvironment,
+  );
+  assert.equal(posted.code, 0, posted.stderr);
+  assert.match(posted.stdout, /日本語の投稿ラッパ確認/);
+
+  const since = store.listMessages("sample", "work-one").at(-1).seq;
+  store.postMessage("sample", "work-one", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "message",
+    body: "日本語の長文です。取得成功を新着ゼロや失敗と混同しません。".repeat(20),
+    to: ["built-in-agent"],
+    refs: [],
+  });
+  const monitored = await runTimedNodeScript(
+    join(scriptRoot, "watch-passive.mjs"),
+    ["--since", String(since), "--interval", "0.01"],
+    repository,
+    scriptEnvironment,
+  );
+  assert.match(monitored.stdout, /MESSAGE .*日本語の長文です/);
+  assert.doesNotMatch(monitored.stderr, /ERROR watch failure=/);
+
+  const latest = store.listMessages("sample", "work-one").at(-1).seq;
+  const empty = await runTimedNodeScript(
+    join(scriptRoot, "watch-passive.mjs"),
+    ["--since", String(latest), "--interval", "0.01"],
+    repository,
+    scriptEnvironment,
+    100,
+  );
+  assert.doesNotMatch(empty.stdout, /MESSAGE /);
+  assert.doesNotMatch(empty.stderr, /ERROR watch failure=/);
+
+  const failedRepository = makeRepository("built-in-watch-failure");
+  mkdirSync(join(failedRepository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(failedRepository, ".ao/config.json"),
+    `${JSON.stringify({
+      server_url: "http://127.0.0.1:1",
+      project: "sample",
+      identifier: "failure-agent",
+      role: "implementer",
+      work: "work-one",
+    })}\n`,
+    "utf8",
+  );
+  const failed = await runTimedNodeScript(
+    join(scriptRoot, "watch-passive.mjs"),
+    ["--interval", "0.01"],
+    failedRepository,
+    scriptEnvironment,
+    150,
+  );
+  assert.match(failed.stderr, /ERROR watch failure=1/);
+  assert.match(failed.stderr, /ERROR watch failure=2/);
+  assert.doesNotMatch(failed.stdout, /MESSAGE /);
+
+  store.postMessage("sample", "work-one", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "question",
+    body: "Built-in agent has the ball",
+    to: ["built-in-agent"],
+    refs: [],
+  });
+  const ball = await runNodeScript(
+    join(scriptRoot, "ball-check.mjs"),
+    [],
+    repository,
+    scriptEnvironment,
+  );
+  assert.equal(ball.code, 0, ball.stderr);
+  assert.match(ball.stdout, /^BALL has_ball=true idle=false reasons=/);
+
+  const loop = await runNodeScript(
+    join(scriptRoot, "self-driven-loop.mjs"),
+    ["--", process.execPath, "-e", "console.log('WORK_UNIT_OK')"],
+    repository,
+    scriptEnvironment,
+  );
+  assert.equal(loop.code, 0, loop.stderr);
+  assert.match(loop.stdout, /WORK_UNIT_OK/);
+  assert.match(loop.stderr, /active thread check/);
+  assert.match(loop.stderr, /cycle complete/);
+});
+
 test("HTTP 400 exits 1 and explains the server rejection", async () => {
   const repository = makeRepository("bad-request");
   await injectRepository(repository, "bad-requester");
@@ -388,13 +706,15 @@ test("import shows a plan, requires confirmation, and sends legacy files", async
 });
 
 test("service skill templates contain none of the retired file protocol", () => {
-  const templates = [
+  const templatePaths = [
     "templates/skills/session-chat/SKILL.md",
     "templates/skills/design-handoff/SKILL.md",
     "templates/skills/grill-with-docs/SKILL.md",
-  ]
-    .map((path) => readFileSync(resolve(path), "utf8"))
-    .join("\n");
+  ];
+  const templateContents = templatePaths.map((path) =>
+    readFileSync(resolve(path), "utf8"),
+  );
+  const templates = templateContents.join("\n");
   for (const retired of [
     "jq -nc",
     "wc -l",
@@ -403,6 +723,40 @@ test("service skill templates contain none of the retired file protocol", () => 
     "ID 衝突",
   ]) {
     assert.equal(templates.includes(retired), false, retired);
+  }
+  for (const [index, content] of templateContents.entries()) {
+    const path = templatePaths[index];
+    assert.match(content, /ao watch --once/, path);
+    assert.match(
+      content,
+      /every two minutes|at least every\s+two minutes/,
+      path,
+    );
+    assert.match(content, /persistent `ao watch`/, path);
+    assert.match(content, /does not\s+update\s+your heartbeat/, path);
+    assert.match(content, /hold (?:the ball|it)/, path);
+    assert.match(content, /treated as abandoned/, path);
+    assert.match(content, /カスタム スケジュール/, path);
+    assert.match(content, /Monitor/, path);
+    assert.match(
+      content,
+      /(?:other|another).*unknown runtime|runtime is\s+different/,
+      path,
+    );
+    assert.match(content, /do not invent|instead of inventing/, path);
+    assert.doesNotMatch(content, /keep `ao watch` running/, path);
+  }
+  const sessionSkill = templateContents[0];
+  for (const script of [
+    "post-safe.mjs",
+    "watch-passive.mjs",
+    "self-driven-loop.mjs",
+    "ball-check.mjs",
+  ]) {
+    assert.match(sessionSkill, new RegExp(script.replace(".", "\\.")));
+    const source = resolve("templates/skills/session-chat/scripts", script);
+    assert.equal(existsSync(source), true, source);
+    assert.notEqual(statSync(source).mode & 0o111, 0, source);
   }
 });
 

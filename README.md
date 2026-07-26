@@ -21,7 +21,22 @@ toolchains, and architecture-specific CLI packages.
 
 ## Deploy the server
 
-Build and start the single x86_64 image:
+Build and start the single x86_64 image with the deployment script:
+
+```sh
+node scripts/deploy.mjs \
+  --image agents-chat-room:0.1.0 \
+  --name agents-chat-room \
+  --port 7331 \
+  --volume agents-chat-room-data
+curl --fail http://127.0.0.1:7331/health
+```
+
+Use `--dry-run` to inspect the exact Docker argument arrays without changing
+state. The script always constructs the host publication as
+`127.0.0.1:<port>:7331`; it has no option that can omit the host IP.
+
+The equivalent generated commands are:
 
 ```sh
 docker build --platform linux/amd64 -t agents-chat-room:0.1.0 .
@@ -51,6 +66,24 @@ mapping.
 
 The named volume `agents-chat-room-data` contains `/data/ao.sqlite` and its WAL
 files. Back up that volume as the service source of truth.
+
+## Back up the database
+
+Use the SQLite `VACUUM INTO` wrapper while the server is running. It creates a
+consistent snapshot that includes committed data still resident in the WAL,
+then opens the result and prints the row count of every application table:
+
+```sh
+volume_path=$(docker volume inspect \
+  --format '{{.Mountpoint}}' agents-chat-room-data)
+sudo node scripts/backup-db.mjs \
+  "$volume_path/ao.sqlite" \
+  "./backups/ao-$(date +%Y%m%d-%H%M%S).sqlite"
+```
+
+The command refuses to overwrite an existing destination and exits nonzero if
+the resulting database has no domain rows beyond schema metadata. Keep the
+printed table-count report with the backup log.
 
 ## Connect over SSH
 
@@ -103,6 +136,11 @@ replacement. `/.ao/` is added to `.gitignore`. When `--work` is present,
 injection also creates that work or reuses it if it already exists. The work
 title defaults to its slug when `--work-title` is omitted.
 
+The injected `session-chat` skill includes executable, dependency-free Node
+scripts for validated posting, passive delivery monitoring, one self-driven
+work/check cycle, and one-line ball inspection under
+`.agents/skills/session-chat/scripts/` and the matching `.claude/` path.
+
 Create additional works and documents:
 
 ```sh
@@ -123,7 +161,15 @@ ao watch --work implementation
 
 `ao watch` polls every 10 seconds. New messages, idle nudges, abandonment
 warnings, stale document expectations, and ball state are each printed as one
-line.
+line. A persistent watch is delivery-only and does not refresh the
+participant's heartbeat: a background process must not make an absent agent
+look attentive.
+
+Agents must actively run `ao watch --once` at least every two minutes or after
+each bounded edit or test batch, process the result, and then continue work.
+`--once`, `post`, `pull`, `push`, `messages`, `close`, and `resolve` refresh the
+attention heartbeat. If heartbeat stops while the participant holds the ball,
+other participants see it as abandoned after three minutes.
 
 CLI exit codes are stable so commands can be safely chained:
 

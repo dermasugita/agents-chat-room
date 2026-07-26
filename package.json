@@ -17,7 +17,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
-    "test": "node --test --test-concurrency=1",
+    "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:acceptance": "node --test --test-concurrency=1 test/acceptance.test.js",
     "check": "node --check src/server.js && node --check bin/ao.js && npm test"
   }

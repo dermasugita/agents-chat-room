@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   appendFileSync,
+  chmodSync,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -191,6 +192,30 @@ function requireWork(context, parsed) {
 
 function workApiPath(context, work) {
   return `/projects/${apiPath(context.config.project)}/works/${apiPath(work)}`;
+}
+
+async function pollWork(context, work, { heartbeat = true, since = 0 } = {}) {
+  const query = new URLSearchParams({
+    as: context.config.identifier,
+    role: context.config.role,
+    since: String(since),
+  });
+  if (!heartbeat) {
+    query.set("heartbeat", "false");
+  }
+  return api(
+    context.config,
+    "GET",
+    `${workApiPath(context, work)}/poll?${query}`,
+  );
+}
+
+async function activeHeartbeat(context, parsed) {
+  const selectedWork = option(parsed, "work", context.config.work);
+  if (selectedWork === undefined || selectedWork === true || selectedWork === "") {
+    return;
+  }
+  await pollWork(context, String(selectedWork));
 }
 
 function apiPath(value) {
@@ -417,33 +442,54 @@ function backupPath(path) {
 
 function installSkillFile(source, target) {
   const content = readFileSync(source, "utf8");
+  const mode = statSync(source).mode & 0o777;
   if (existsSync(target)) {
     if (readFileSync(target, "utf8") === content) {
+      chmodSync(target, mode);
       return { action: "unchanged", target };
     }
     const backup = backupPath(target);
     copyFileSync(target, backup);
     atomicWrite(target, content);
+    chmodSync(target, mode);
     return { action: "backed-up", backup, target };
   }
   atomicWrite(target, content);
+  chmodSync(target, mode);
   return { action: "created", target };
+}
+
+function skillFiles(root, directory = root) {
+  const files = [];
+  for (const entry of readdirSync(directory, { withFileTypes: true }).sort(
+    (left, right) => left.name.localeCompare(right.name),
+  )) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...skillFiles(root, path));
+    } else if (entry.isFile()) {
+      files.push(relative(root, path));
+    }
+  }
+  return files;
 }
 
 function installSkills(repository) {
   const results = [];
   for (const name of readdirSync(TEMPLATE_ROOT)) {
-    const source = join(TEMPLATE_ROOT, name, "SKILL.md");
-    if (!existsSync(source)) {
+    const sourceRoot = join(TEMPLATE_ROOT, name);
+    if (!statSync(sourceRoot).isDirectory()) {
       continue;
     }
-    for (const root of [".claude", ".agents"]) {
-      results.push(
-        installSkillFile(
-          source,
-          join(repository, root, "skills", name, "SKILL.md"),
-        ),
-      );
+    for (const file of skillFiles(sourceRoot)) {
+      for (const root of [".claude", ".agents"]) {
+        results.push(
+          installSkillFile(
+            join(sourceRoot, file),
+            join(repository, root, "skills", name, file),
+          ),
+        );
+      }
     }
   }
   appendInstructionPointer(join(repository, "CLAUDE.md"));
@@ -798,16 +844,10 @@ async function watch(context, parsed) {
   let failures = 0;
   while (true) {
     try {
-      const query = new URLSearchParams({
-        as: context.config.identifier,
-        role: context.config.role,
-        since: String(since),
+      const result = await pollWork(context, work, {
+        heartbeat: once,
+        since,
       });
-      const result = await api(
-        context.config,
-        "GET",
-        `${workApiPath(context, work)}/poll?${query}`,
-      );
       emitPoll(result);
       if (result.messages.length > 0) {
         since = result.messages.at(-1).seq;
@@ -848,6 +888,7 @@ export async function main(argv) {
 
   const context = loadContext(parsed);
   if (command === "pull") {
+    await activeHeartbeat(context, parsed);
     print(
       await pullDocuments(
         context,
@@ -862,6 +903,7 @@ export async function main(argv) {
     if (!identifier) {
       throw new CliError("push requires a document identifier");
     }
+    await activeHeartbeat(context, parsed);
     print(await pushDocument(context, identifier, option(parsed, "note")));
     return;
   }
@@ -872,11 +914,10 @@ export async function main(argv) {
   if (command === "messages") {
     const work = requireWork(context, parsed);
     const since = Number(option(parsed, "since", 0));
-    const result = await api(
-      context.config,
-      "GET",
-      `${workApiPath(context, work)}/messages?since=${since}`,
-    );
+    if (!Number.isInteger(since) || since < 0) {
+      throw new CliError("--since must be a non-negative integer");
+    }
+    const result = await pollWork(context, work, { since });
     for (const message of result.messages) {
       console.log(messageLine(message));
     }
@@ -892,6 +933,7 @@ export async function main(argv) {
     if (!Number.isInteger(seq) || seq < 1) {
       throw new CliError("close requires a positive message sequence");
     }
+    await pollWork(context, work);
     print(
       await api(
         context.config,
@@ -906,6 +948,7 @@ export async function main(argv) {
   }
   if (command === "resolve") {
     const work = requireWork(context, parsed);
+    await pollWork(context, work);
     print(
       await api(
         context.config,
