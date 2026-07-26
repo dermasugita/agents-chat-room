@@ -249,14 +249,23 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
       join(repository, ".agents/skills/session-chat/SKILL.md"),
       "utf8",
     ),
-    /outside the current scope[\s\S]*ao issue-create[\s\S]*question[\s\S]*no notification/,
+    // 基準82: 課題は watch が配達する。「自分で見に行け」に戻っていないことも固定する。
+    /outside the current scope[\s\S]*ao issue-create[\s\S]*question[\s\S]*`ISSUE` lines in `ao watch --once`[\s\S]*never create a ball/,
+  );
+  assert.doesNotMatch(
+    readFileSync(
+      join(repository, ".agents/skills/session-chat/SKILL.md"),
+      "utf8",
+    ),
+    /read them yourself|no notification/,
   );
   assert.match(
     readFileSync(
       join(repository, ".agents/skills/design-handoff/SKILL.md"),
       "utf8",
     ),
-    /ao issues <PROJECT>[\s\S]*Issues do not notify you or[\s\S]*startup and during every periodic/,
+    // 基準82: 起動時に全件、以後は watch の ISSUE 行。周期ループに ao issues を入れない。
+    /ao issues <PROJECT>\s+# once at startup[\s\S]*`ISSUE` lines carry new issues[\s\S]*do not have to go looking for issues in the loop/,
   );
   for (const script of [
     "post-safe.mjs",
@@ -2408,8 +2417,15 @@ test("service skill templates contain none of the retired file protocol", () => 
     sessionSkill,
     /Never point `cli\.args` at a\s+path inside the repository/,
   );
-  assert.match(sessionSkill, /### 4\. Join from inside the worktree/);
-  assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
+  // 基準84: 新しい worktree にはヘルパが無いので、メインチェックアウトから
+  // --repo で worktree を指して実行し、そのあと cd する。逆順にすると失敗する。
+  assert.match(sessionSkill, /### 4\. Install the skills into the worktree, then enter it/);
+  assert.match(sessionSkill, /Stay in the main checkout for this command/);
+  assert.match(
+    sessionSkill,
+    /join-room\.mjs <NUMBER> --repo worktree\/<WORK>\s*\ncd worktree\/<WORK>/,
+  );
+  assert.match(sessionSkill, /ls \.claude\/skills \.agents\/skills/);
   assert.match(
     sessionSkill,
     /### 6\. Register a periodic self-check — mandatory/,

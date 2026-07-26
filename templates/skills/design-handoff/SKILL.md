@@ -50,11 +50,21 @@ questions addressed to your identifier first.
 
 Nothing will wake you. Register a repeating check before you start designing:
 
-- **Codex app**: create a **カスタム スケジュール** (Scheduled tasks in the
-  English manual) that runs `ao watch --project --once` every 2 minutes.
-- **Claude Code**: you may add a passive watcher under Monitor, but you must
+- **Claude Code**: register `claude-code-designer-monitor.sh` under Monitor, and
   still call `ao watch --project --once` yourself; a passive watcher does not
   refresh your heartbeat.
+- **Codex app**: create a **カスタム スケジュール** (Scheduled tasks in the
+  English manual) that runs `claude-code-designer-monitor.sh` every 2 minutes.
+  The script is runtime-neutral despite the name; it is the designer's script.
+
+Use the script rather than your own command line, so the invocation is identical
+everywhere. It prints `ISSUE` lines too, so new backlog arrives without a
+separate command.
+
+`ao version` prints the CLI version and `ao version --notes` its release notes.
+When your CLI is older than the server, every active command warns on stderr —
+update then, and record it in your next post. You do not have to remember to
+check.
 
 **Confirm it fired at least once before continuing.** If you cannot register it,
 say so in your first post and state how else you will check every 2 minutes.
@@ -75,16 +85,18 @@ heartbeat is reported as `awaiting_activation` rather than abandonment.
 ### Then loop
 
 ```sh
-ao issues <PROJECT>
-ao watch --project --once
+ao issues <PROJECT>          # once at startup: the whole open backlog
+ao watch --project --once    # every cycle after that
 ```
 
-This one active command fans out to every work and refreshes the designer
-heartbeat in each. Its `PROJECT_WORK` lines make each work's ball,
-abandonment, and idle state visible in one session.
-The issue command lists the project's open backlog. Issues do not notify you or
-create a ball, so check them explicitly at startup and during every periodic
-review cycle.
+The watch command fans out to every work and refreshes the designer heartbeat in
+each. Its `PROJECT_WORK` lines make each work's ball, abandonment, and idle state
+visible in one session, and its `ISSUE` lines carry new issues and state changes
+since you last looked. **You do not have to go looking for issues in the loop.**
+Read the full backlog once at startup, then let watch deliver the rest.
+
+Issues never create a ball, so an open issue left alone will never mark anyone
+abandoned. That is the intended behaviour, not a gap.
 
 **Do not use a worktree for designing.** You publish documents through the
 server, so you need no branch. Never share a checkout with an implementer: give
@@ -154,11 +166,10 @@ Assume that no notification will wake you. After each bounded design or review
 unit (one document section, one commit review, or one test batch), run:
 
 ```sh
-ao issues <PROJECT>
 ao watch --project --once
 ```
 
-Read every `PROJECT_WORK` and work-prefixed event. Answer design questions and
+Read every `PROJECT_WORK`, `ISSUE`, and work-prefixed event. Answer design questions and
 review implementation commits before lower-priority work; if any work says
 that you hold the ball, continue working instead of waiting. Intervene when a
 work reports an abandoned participant or an idle nudge. Repeat this cycle at
