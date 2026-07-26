@@ -16,7 +16,10 @@ import {
   resolve,
 } from "node:path";
 import { fileURLToPath } from "node:url";
-import { inspectDatabase } from "./lib/database-snapshot.mjs";
+import {
+  inspectDatabase,
+  tableCountsMatch,
+} from "./lib/database-snapshot.mjs";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const options = {
@@ -137,6 +140,29 @@ function captureDocker(commandArgs) {
   });
 }
 
+function restartStoppedContainer(name) {
+  console.log(JSON.stringify(["docker", "start", name]));
+  const restarted = captureDocker(["start", name]);
+  if (restarted.error || restarted.status !== 0) {
+    console.error(
+      `deploy: WARNING: could not restart stopped container ${name}: ${
+        restarted.error?.message ?? restarted.stderr.trim()
+      }`,
+    );
+  }
+}
+
+function failMigration(message, temporary, restartOld) {
+  if (existsSync(temporary)) {
+    unlinkSync(temporary);
+  }
+  console.error(message);
+  if (restartOld) {
+    restartStoppedContainer(options.name);
+  }
+  process.exit(1);
+}
+
 function migrateExistingDatabase() {
   const destination = join(options.stateDir, "ao.sqlite");
   if (options.dryRun || existsSync(destination)) {
@@ -156,74 +182,119 @@ function migrateExistingDatabase() {
     );
     process.exit(1);
   }
+  let inspected;
+  try {
+    [inspected] = JSON.parse(inspection.stdout);
+  } catch {
+    console.error("deploy: existing container inspection returned invalid JSON");
+    process.exit(1);
+  }
+  if (!inspected || typeof inspected !== "object") {
+    console.error("deploy: existing container inspection was empty");
+    process.exit(1);
+  }
 
-  const containerSnapshot = "/tmp/ao-deploy-migration.sqlite";
-  const migrationProgram = `
-    const { existsSync, unlinkSync } = require("node:fs");
-    const { DatabaseSync } = require("node:sqlite");
-    const source = process.env.AO_DATABASE_PATH || "/data/ao.sqlite";
-    const destination = ${JSON.stringify(containerSnapshot)};
-    if (existsSync(destination)) unlinkSync(destination);
-    const database = new DatabaseSync(source, { readOnly: true });
-    try {
-      database.exec("PRAGMA busy_timeout = 5000");
-      database.exec("VACUUM INTO '" + destination.replaceAll("'", "''") + "'");
-    } finally {
-      database.close();
-    }
-  `;
-  const snapshot = captureDocker([
-    "exec",
-    options.name,
-    "node",
-    "-e",
-    migrationProgram,
-  ]);
-  if (snapshot.error || snapshot.status !== 0) {
+  const source =
+    inspected.Config?.Env?.find((value) =>
+      value.startsWith("AO_DATABASE_PATH="),
+    )?.slice("AO_DATABASE_PATH=".length) || "/data/ao.sqlite";
+  if (!source.startsWith("/")) {
     console.error(
-      `deploy: cannot snapshot existing database: ${
-        snapshot.error?.message ?? snapshot.stderr.trim()
-      }`,
+      `deploy: existing AO_DATABASE_PATH must be absolute: ${source}`,
     );
     process.exit(1);
   }
 
-  const temporary = `${destination}.migration-${process.pid}`;
+  const wasRunning = inspected.State?.Running === true;
+  if (wasRunning) {
+    run(["stop", options.name]);
+  }
+
+  const temporary = `${destination}.migration`;
   if (existsSync(temporary)) {
     unlinkSync(temporary);
   }
-  const copied = captureDocker([
-    "cp",
-    `${options.name}:${containerSnapshot}`,
-    temporary,
+  const migrationName = `${options.name}-migration`;
+  const containerDestination = "/migration/ao.sqlite.migration";
+  const snapshot = runCaptured([
+    "run",
+    "--rm",
+    "--name",
+    migrationName,
+    "--platform",
+    "linux/amd64",
+    "--user",
+    containerUser,
+    "--volumes-from",
+    `${options.name}:ro`,
+    "--mount",
+    `type=bind,source=${options.stateDir},target=/migration`,
+    options.image,
+    "node",
+    "scripts/migrate-db.mjs",
+    source,
+    containerDestination,
   ]);
-  if (copied.error || copied.status !== 0) {
-    console.error(
-      `deploy: cannot copy existing database snapshot: ${
-        copied.error?.message ?? copied.stderr.trim()
+  if (snapshot.error || snapshot.status !== 0) {
+    failMigration(
+      `deploy: cannot snapshot existing database: ${
+        snapshot.error?.message ?? snapshot.stderr.trim()
       }`,
+      temporary,
+      wasRunning,
     );
-    process.exit(1);
+  }
+
+  let migrationReport;
+  try {
+    migrationReport = JSON.parse(snapshot.stdout.trim().split("\n").at(-1));
+  } catch {
+    failMigration(
+      "deploy: migration container returned an invalid count report",
+      temporary,
+      wasRunning,
+    );
+  }
+  if (!existsSync(temporary)) {
+    failMigration(
+      "deploy: migration container did not create the expected snapshot",
+      temporary,
+      wasRunning,
+    );
   }
   chmodSync(temporary, 0o600);
 
-  let report;
+  let destinationReport;
   try {
-    report = inspectDatabase(temporary);
+    destinationReport = inspectDatabase(temporary);
   } catch (error) {
-    unlinkSync(temporary);
-    console.error(`deploy: cannot validate migrated database: ${error.message}`);
-    process.exit(1);
+    failMigration(
+      `deploy: cannot validate migrated database: ${error.message}`,
+      temporary,
+      wasRunning,
+    );
   }
   if (
-    report.content_rows === 0 ||
-    report.foreign_key_issues.length > 0
+    migrationReport.counts_match !== true ||
+    !migrationReport.source ||
+    !migrationReport.destination ||
+    migrationReport.source.content_rows === 0 ||
+    migrationReport.source.foreign_key_issues?.length > 0 ||
+    migrationReport.destination.foreign_key_issues?.length > 0 ||
+    destinationReport.foreign_key_issues.length > 0 ||
+    !tableCountsMatch(migrationReport.source, migrationReport.destination) ||
+    !tableCountsMatch(migrationReport.source, destinationReport)
   ) {
-    unlinkSync(temporary);
-    console.error(
-      "deploy: migrated database is empty or failed foreign-key validation",
+    failMigration(
+      `deploy: migrated database table counts do not match the stopped source: ${JSON.stringify(
+        {
+          source: migrationReport.source?.tables,
+          destination: destinationReport.tables,
+        },
+      )}`,
+      temporary,
+      wasRunning,
     );
-    process.exit(1);
   }
   renameSync(temporary, destination);
   console.log(
@@ -231,11 +302,21 @@ function migrateExistingDatabase() {
       event: "migrated_existing_database",
       source_container: options.name,
       destination,
-      total_rows: report.total_rows,
-      content_rows: report.content_rows,
-      tables: report.tables,
+      writes_stopped: true,
+      counts_match: true,
+      total_rows: destinationReport.total_rows,
+      content_rows: destinationReport.content_rows,
+      tables: destinationReport.tables,
     }),
   );
+}
+
+function runCaptured(commandArgs) {
+  console.log(JSON.stringify(["docker", ...commandArgs]));
+  if (options.dryRun) {
+    return { status: 0, stdout: "", stderr: "" };
+  }
+  return captureDocker(commandArgs);
 }
 
 function run(commandArgs, { allowFailure = false } = {}) {
@@ -260,7 +341,6 @@ const backupName = `${options.name}-backup`;
 const stateMount =
   `type=bind,source=${options.stateDir},target=/var/lib/agents-chat-room`;
 
-migrateExistingDatabase();
 if (!options.skipBuild) {
   run([
     "build",
@@ -271,6 +351,7 @@ if (!options.skipBuild) {
     repository,
   ]);
 }
+migrateExistingDatabase();
 run(["rm", "--force", backupName], { allowFailure: true });
 run(["rm", "--force", options.name], { allowFailure: true });
 run([

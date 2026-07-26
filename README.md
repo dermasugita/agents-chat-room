@@ -43,11 +43,14 @@ container does not remove that directory. Do not put the live database under
 
 On the first deployment from the retired named-volume layout, if the bind
 directory has no `ao.sqlite` and the old container still exists, `deploy.mjs`
-takes a live `VACUUM INTO` snapshot inside that container, copies it to the
-bind directory, verifies every table and foreign key, and only then replaces
-the container. Keep the old container running for this migration. The script
-does not delete the old named volume; retain it until the new service and
-backups have been verified.
+first builds the replacement image while the old server remains writable.
+It then stops the old server, mounts its volumes read-only in a temporary
+migration process, takes a `VACUUM INTO` snapshot, and compares every table
+count and foreign key before atomically publishing the bind-mounted database.
+The replacement server is started only after those counts match. On any
+migration or count failure, the replacement is not started and the old server
+is restarted. The script does not delete the old named volume; retain it until
+the new service and backups have been verified.
 
 Use `--dry-run` to inspect the exact Docker argument arrays without changing
 state. The script always constructs the host publication as

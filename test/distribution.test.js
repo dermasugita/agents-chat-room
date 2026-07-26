@@ -81,16 +81,44 @@ function fakeDocker(bin) {
   writeFileSync(
     executable,
     `#!/bin/sh
+printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 if [ "$1" = "container" ] && [ "$2" = "inspect" ]; then
-  printf '%s\\n' '[{"State":{"Running":true}}]'
+  printf '%s\\n' '[{"State":{"Running":true},"Config":{"Env":["AO_DATABASE_PATH=/data/ao.sqlite"]}}]'
   exit 0
 fi
-if [ "$1" = "exec" ]; then
+if [ "$1" = "build" ]; then
+  if [ -n "$FAKE_DOCKER_BUILD_WRITE_SCRIPT" ]; then
+    "$FAKE_DOCKER_NODE" "$FAKE_DOCKER_BUILD_WRITE_SCRIPT" "$FAKE_DOCKER_SNAPSHOT" || exit $?
+  fi
+  touch "$FAKE_DOCKER_BUILD_MARKER"
   exit 0
 fi
-if [ "$1" = "cp" ]; then
-  cp "$FAKE_DOCKER_SNAPSHOT" "$3"
-  exit $?
+if [ "$1" = "stop" ]; then
+  if [ "$FAKE_DOCKER_REQUIRE_BUILD" = "1" ] && [ ! -f "$FAKE_DOCKER_BUILD_MARKER" ]; then
+    printf '%s\\n' 'server stopped before build completed' >&2
+    exit 91
+  fi
+  touch "$FAKE_DOCKER_STOP_MARKER"
+  exit 0
+fi
+if [ "$1" = "run" ]; then
+  case " $* " in
+    *" --name $FAKE_DOCKER_MIGRATION_NAME "*)
+      if [ ! -f "$FAKE_DOCKER_STOP_MARKER" ]; then
+        printf '%s\\n' 'migration ran before writes stopped' >&2
+        exit 92
+      fi
+      "$FAKE_DOCKER_NODE" "$FAKE_DOCKER_MIGRATE_SCRIPT" "$FAKE_DOCKER_SNAPSHOT" "$FAKE_DOCKER_DESTINATION" || exit $?
+      if [ -n "$FAKE_DOCKER_TAMPER_SCRIPT" ]; then
+        "$FAKE_DOCKER_NODE" "$FAKE_DOCKER_TAMPER_SCRIPT" "$FAKE_DOCKER_DESTINATION" || exit $?
+      fi
+      exit 0
+      ;;
+  esac
+fi
+if [ "$1" = "start" ]; then
+  touch "$FAKE_DOCKER_RESTART_MARKER"
+  exit 0
 fi
 exit 0
 `,
@@ -173,10 +201,35 @@ test("deploy script requires main and constructs bind-mounted server and backup 
   }
 });
 
-test("first bind deployment migrates and validates the existing live database", async () => {
+test("first bind migration includes build-time writes after stopping the old server", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ao-deploy-migration-test-"));
   const legacySnapshot = join(directory, "legacy.sqlite");
   const stateDirectory = join(directory, "persistent-state");
+  const buildMarker = join(directory, "build-complete");
+  const stopMarker = join(directory, "writes-stopped");
+  const restartMarker = join(directory, "old-restarted");
+  const dockerLog = join(directory, "docker.log");
+  const buildWriteScript = join(directory, "build-write.mjs");
+  writeFileSync(
+    buildWriteScript,
+    `import { DatabaseSync } from "node:sqlite";
+const database = new DatabaseSync(process.argv[2]);
+database.prepare("INSERT INTO project(slug, name, created_at) VALUES (?, ?, ?)").run(
+  "during-build",
+  "Accepted during build",
+  "2026-07-26T00:00:00.000Z",
+);
+const project = database.prepare("SELECT id FROM project WHERE slug = ?").get("during-build");
+database.prepare("INSERT INTO work(project_id, slug, title, state, created_at) VALUES (?, ?, ?, 'open', ?)").run(
+  project.id,
+  "preserved",
+  "Preserved build-time write",
+  "2026-07-26T00:00:00.000Z",
+);
+database.close();
+`,
+    "utf8",
+  );
   const legacy = createDatabase(legacySnapshot);
   try {
     const store = createStore(legacy);
@@ -193,7 +246,6 @@ test("first bind deployment migrates and validates the existing live database", 
       process.execPath,
       [
         resolve("scripts/deploy.mjs"),
-        "--skip-build",
         "--name",
         "migration-probe",
         "--state-dir",
@@ -203,7 +255,20 @@ test("first bind deployment migrates and validates the existing live database", 
         cwd: resolve("."),
         env: {
           ...process.env,
+          FAKE_DOCKER_BUILD_MARKER: buildMarker,
+          FAKE_DOCKER_BUILD_WRITE_SCRIPT: buildWriteScript,
+          FAKE_DOCKER_DESTINATION: join(
+            stateDirectory,
+            "ao.sqlite.migration",
+          ),
+          FAKE_DOCKER_LOG: dockerLog,
+          FAKE_DOCKER_MIGRATE_SCRIPT: resolve("scripts/migrate-db.mjs"),
+          FAKE_DOCKER_MIGRATION_NAME: "migration-probe-migration",
+          FAKE_DOCKER_NODE: process.execPath,
+          FAKE_DOCKER_REQUIRE_BUILD: "1",
+          FAKE_DOCKER_RESTART_MARKER: restartMarker,
           FAKE_DOCKER_SNAPSHOT: legacySnapshot,
+          FAKE_DOCKER_STOP_MARKER: stopMarker,
           PATH: `${bin}:${process.env.PATH}`,
         },
       },
@@ -212,25 +277,144 @@ test("first bind deployment migrates and validates the existing live database", 
       .trim()
       .split("\n")
       .map((line) => JSON.parse(line));
-    assert.equal(output[0].event, "migrated_existing_database");
-    assert.equal(output[0].content_rows, 2);
+    const buildIndex = output.findIndex(
+      (item) => Array.isArray(item) && item[1] === "build",
+    );
+    const stopIndex = output.findIndex(
+      (item) => Array.isArray(item) && item[1] === "stop",
+    );
+    const migrationIndex = output.findIndex(
+      (item) =>
+        Array.isArray(item) &&
+        item[1] === "run" &&
+        item.includes("migration-probe-migration"),
+    );
+    assert.ok(buildIndex >= 0);
+    assert.ok(stopIndex > buildIndex);
+    assert.ok(migrationIndex > stopIndex);
+    const migration = output.find(
+      (item) => item.event === "migrated_existing_database",
+    );
+    assert.equal(migration.writes_stopped, true);
+    assert.equal(migration.counts_match, true);
+    assert.equal(migration.content_rows, 4);
     assert.equal(existsSync(legacySnapshot), true);
+    assert.equal(existsSync(buildMarker), true);
+    assert.equal(existsSync(stopMarker), true);
+    assert.equal(existsSync(restartMarker), false);
     const migratedPath = join(stateDirectory, "ao.sqlite");
     assert.equal(existsSync(migratedPath), true);
     const migrated = new DatabaseSync(migratedPath, { readOnly: true });
     try {
       assert.equal(
         migrated.prepare("SELECT COUNT(*) AS count FROM project").get().count,
-        1,
+        2,
       );
       assert.equal(
         migrated.prepare("SELECT COUNT(*) AS count FROM work").get().count,
+        2,
+      );
+      assert.equal(
+        migrated
+          .prepare("SELECT COUNT(*) AS count FROM project WHERE slug = 'during-build'")
+          .get().count,
         1,
       );
       assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
     } finally {
       migrated.close();
     }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("deploy refuses a count mismatch, starts no replacement, and restarts the old server", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ao-deploy-mismatch-test-"));
+  const legacySnapshot = join(directory, "legacy.sqlite");
+  const stateDirectory = join(directory, "persistent-state");
+  const buildMarker = join(directory, "build-complete");
+  const stopMarker = join(directory, "writes-stopped");
+  const restartMarker = join(directory, "old-restarted");
+  const dockerLog = join(directory, "docker.log");
+  const tamperScript = join(directory, "tamper.mjs");
+  writeFileSync(
+    tamperScript,
+    `import { DatabaseSync } from "node:sqlite";
+const database = new DatabaseSync(process.argv[2]);
+database.prepare("INSERT INTO project(slug, name, created_at) VALUES (?, ?, ?)").run(
+  "count-mismatch",
+  "Count mismatch",
+  "2026-07-26T00:00:00.000Z",
+);
+database.close();
+`,
+    "utf8",
+  );
+  const legacy = createDatabase(legacySnapshot);
+  try {
+    const store = createStore(legacy);
+    store.createProject({ slug: "legacy-live", name: "Legacy live" });
+    store.createWork("legacy-live", { slug: "work", title: "Work" });
+  } finally {
+    legacy.close();
+  }
+
+  try {
+    const bin = fakeGit(directory, "main");
+    fakeDocker(bin);
+    await assert.rejects(
+      execFileAsync(
+        process.execPath,
+        [
+          resolve("scripts/deploy.mjs"),
+          "--name",
+          "mismatch-probe",
+          "--state-dir",
+          stateDirectory,
+        ],
+        {
+          cwd: resolve("."),
+          env: {
+            ...process.env,
+            FAKE_DOCKER_BUILD_MARKER: buildMarker,
+            FAKE_DOCKER_DESTINATION: join(
+              stateDirectory,
+              "ao.sqlite.migration",
+            ),
+            FAKE_DOCKER_LOG: dockerLog,
+            FAKE_DOCKER_MIGRATE_SCRIPT: resolve("scripts/migrate-db.mjs"),
+            FAKE_DOCKER_MIGRATION_NAME: "mismatch-probe-migration",
+            FAKE_DOCKER_NODE: process.execPath,
+            FAKE_DOCKER_REQUIRE_BUILD: "1",
+            FAKE_DOCKER_RESTART_MARKER: restartMarker,
+            FAKE_DOCKER_SNAPSHOT: legacySnapshot,
+            FAKE_DOCKER_STOP_MARKER: stopMarker,
+            FAKE_DOCKER_TAMPER_SCRIPT: tamperScript,
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+        },
+      ),
+      (error) => {
+        assert.equal(error.code, 1);
+        assert.match(error.stderr, /table counts do not match the stopped source/);
+        return true;
+      },
+    );
+    assert.equal(existsSync(join(stateDirectory, "ao.sqlite")), false);
+    assert.equal(existsSync(join(stateDirectory, "ao.sqlite.migration")), false);
+    assert.equal(existsSync(restartMarker), true);
+    const commands = readFileSync(dockerLog, "utf8").trim().split("\n");
+    assert.equal(
+      commands.some((line) =>
+        line.includes("run --detach --name mismatch-probe --restart"),
+      ),
+      false,
+    );
+    assert.equal(
+      commands.some((line) => line === "start mismatch-probe"),
+      true,
+    );
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
