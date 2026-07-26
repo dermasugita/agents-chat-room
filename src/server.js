@@ -213,7 +213,7 @@ async function routeApi(request, response, url, store) {
         decode(match[1]),
         decode(match[2]),
         url.searchParams.get("as"),
-        url.searchParams.get("role") ?? "implementer",
+        url.searchParams.get("role"),
         integerQuery(url, "since"),
       ),
     );

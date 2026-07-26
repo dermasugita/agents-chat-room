@@ -278,6 +278,46 @@ test("a participant with the ball and a stale heartbeat is abandoned", () => {
   );
 });
 
+test("poll infers an existing role, requires one for registration, and reports conflicts", async () => {
+  post("work-one", { body: "register designer" });
+
+  await withServer(async (base) => {
+    const missing = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/works/work-one/poll?as=brand-new",
+    );
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, "role_required");
+
+    const existing = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/works/work-one/poll?as=designer",
+    );
+    assert.equal(existing.status, 200);
+    assert.match(existing.body.heartbeat_at, /^2026-07-26T/);
+
+    const conflict = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/works/work-one/poll?as=designer&role=implementer",
+    );
+    assert.equal(conflict.status, 409);
+    assert.equal(conflict.body.registered_role, "designer");
+    assert.equal(conflict.body.requested_role, "implementer");
+    assert.match(conflict.body.message, /designer.*implementer/);
+
+    const registered = await request(
+      base,
+      "GET",
+      "/api/v1/projects/sample/works/work-one/poll?as=brand-new&role=implementer",
+    );
+    assert.equal(registered.status, 200);
+    assert.match(registered.body.heartbeat_at, /^2026-07-26T/);
+  });
+});
+
 test("resolve does not suppress abandonment or idle nudges", () => {
   post("work-one", {
     from: "implementer",

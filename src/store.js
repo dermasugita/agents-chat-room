@@ -206,7 +206,11 @@ export function createStore(database, options = {}) {
         existing.role === role,
         409,
         "participant_role_conflict",
-        `${identifier} is already registered as ${existing.role}`,
+        `${identifier} is registered as ${existing.role}; requested role was ${role}`,
+        {
+          registered_role: existing.role,
+          requested_role: role,
+        },
       );
       return;
     }
@@ -831,22 +835,44 @@ export function createStore(database, options = {}) {
     projectSlug,
     workSlug,
     identifier,
-    role = "implementer",
+    role = undefined,
     since = 0,
   ) {
     const work = workBySlug(projectSlug, workSlug);
     assert(typeof identifier === "string" && identifier, 400, "invalid_request", "as is required");
-    assert(ROLES.has(role), 400, "invalid_request", "role is invalid");
+    if (role !== undefined && role !== null) {
+      assert(ROLES.has(role), 400, "invalid_request", "role is invalid");
+    }
     assert(
       Number.isInteger(since) && since >= 0,
       400,
       "invalid_request",
       "since must be a non-negative integer",
     );
+    const participant = database
+      .prepare("SELECT role FROM participant WHERE work_id = ? AND identifier = ?")
+      .get(work.id, identifier);
+    assert(
+      participant || ROLES.has(role),
+      400,
+      "role_required",
+      "role is required when registering a new participant",
+    );
+    assert(
+      !participant || role === undefined || role === null || participant.role === role,
+      409,
+      "participant_role_conflict",
+      `${identifier} is registered as ${participant?.role}; requested role was ${role}`,
+      {
+        registered_role: participant?.role,
+        requested_role: role,
+      },
+    );
+    const effectiveRole = participant?.role ?? role;
     const heartbeatAt = now();
     inTransaction(database, () => {
-      registerParticipant(work.id, identifier, role, heartbeatAt);
-      if (role !== "owner") {
+      registerParticipant(work.id, identifier, effectiveRole, heartbeatAt);
+      if (effectiveRole !== "owner") {
         database
           .prepare(
             `UPDATE participant SET last_heartbeat_at = ?
@@ -880,7 +906,7 @@ export function createStore(database, options = {}) {
         : null,
       abandoned,
       stale_expectations: staleExpectations(work.id, identifier),
-      heartbeat_at: role === "owner" ? null : heartbeatAt,
+      heartbeat_at: effectiveRole === "owner" ? null : heartbeatAt,
     };
   }
 
