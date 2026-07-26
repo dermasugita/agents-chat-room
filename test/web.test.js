@@ -27,12 +27,12 @@ before(async () => {
   });
   store.createDocument("web-project", {
     kind: "context",
-    title: "Shared terms",
-    body: "# Shared terms\n\n**Source of truth** and `copy`.",
+    title: "Stored shared terms",
+    body: "# Original shared terms\n\n**Source of truth** and `copy`.",
     author: "designer",
   });
   store.updateDocument("web-project", "context", {
-    body: "# Shared terms\n\nRevision two.",
+    body: "# Current shared terms\n\nRevision two.",
     base_revision: 1,
     author: "designer",
     note: "second",
@@ -202,11 +202,23 @@ test("sidebar shows project-work hierarchy and the current location", async () =
 });
 
 test("web shows current documents, revision history, and arbitrary revisions", async () => {
+  const project = await (
+    await fetch(`${base}/projects/web-project`)
+  ).text();
+  assert.match(project, />Current shared terms<\/a>/);
+  assert.doesNotMatch(project, /Stored shared terms|Original shared terms/);
+
   const current = await (
     await fetch(
       `${base}/projects/web-project/document?doc=${encodeURIComponent("context")}`,
     )
   ).text();
+  assert.match(
+    current,
+    /<title>Current shared terms · agents-chat-room<\/title>/,
+  );
+  assert.match(current, /<h1>Current shared terms<\/h1>/);
+  assert.doesNotMatch(current, /Stored shared terms|Original shared terms/);
   assert.match(current, /Revision two/);
   assert.match(current, /リビジョン 2/);
   assert.match(current, /リビジョン 1/);
@@ -221,6 +233,12 @@ test("web shows current documents, revision history, and arbitrary revisions", a
       `${base}/projects/web-project/document?doc=${encodeURIComponent("context")}&revision=1`,
     )
   ).text();
+  assert.match(
+    old,
+    /<title>Original shared terms · agents-chat-room<\/title>/,
+  );
+  assert.match(old, /<h1>Original shared terms<\/h1>/);
+  assert.doesNotMatch(old, /Stored shared terms|Current shared terms/);
   assert.match(old, /Source of truth/);
 });
 
