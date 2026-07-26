@@ -48,6 +48,12 @@ Usage:
   ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]
   ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]
   ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]
+  ao issue-create <PROJECT> --title TITLE --body TEXT [--repo PATH]
+  ao issues [PROJECT] [--state open|closed|all] [--repo PATH]
+  ao issue <PROJECT> <NUMBER> [--repo PATH]
+  ao issue-comment <PROJECT> <NUMBER> --body TEXT [--repo PATH]
+  ao issue-close <PROJECT> <NUMBER> --reason TEXT [--repo PATH]
+  ao issue-reopen <PROJECT> <NUMBER> [--repo PATH]
   ao import <repo> [--yes] [--project SLUG] [--name NAME]
 
 Server resolution order is AO_SERVER_URL, repository .ao/config.json, then
@@ -149,6 +155,14 @@ function requireOption(parsed, name) {
     throw new CliError(`--${name} is required`);
   }
   return String(value);
+}
+
+function rejectUnknownOptions(parsed, allowed) {
+  for (const name of parsed.options.keys()) {
+    if (!allowed.has(name)) {
+      throw new CliError(`Unknown option --${name}`);
+    }
+  }
 }
 
 function readJson(path, fallback = undefined) {
@@ -460,6 +474,131 @@ async function deleteParticipantCommand(parsed) {
     resolveServerUrl(parsed),
     "DELETE",
     `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}/participants/${encodeURIComponent(identifier)}`,
+  );
+}
+
+function issueIdentity(context) {
+  return {
+    origin_project: context.config.project,
+    origin_identifier: context.config.identifier,
+    origin_role: context.config.role,
+    ...(context.config.work ? { origin_work: context.config.work } : {}),
+  };
+}
+
+function issueNumberArgument(parsed, index, usage) {
+  const number = Number(requiredArgument(parsed, index, usage));
+  if (!Number.isInteger(number) || number < 1) {
+    throw new CliError(`Usage: ${usage}`);
+  }
+  return number;
+}
+
+function assertPositionalCount(parsed, count, usage) {
+  if (parsed.positional.length !== count) {
+    throw new CliError(`Usage: ${usage}`);
+  }
+}
+
+async function issueCreateCommand(context, parsed) {
+  const usage =
+    "ao issue-create <PROJECT> --title TITLE --body TEXT [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["title", "body", "repo"]));
+  assertPositionalCount(parsed, 2, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues`,
+    {
+      title: requireOption(parsed, "title"),
+      body: requireOption(parsed, "body"),
+      ...issueIdentity(context),
+    },
+  );
+}
+
+async function issuesCommand(context, parsed) {
+  const usage = "ao issues [PROJECT] [--state open|closed|all] [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["state", "repo"]));
+  if (parsed.positional.length > 2) {
+    throw new CliError(`Usage: ${usage}`);
+  }
+  const state = String(option(parsed, "state", "open"));
+  if (!["open", "closed", "all"].includes(state)) {
+    throw new CliError("--state must be open, closed, or all");
+  }
+  const query = new URLSearchParams({ state });
+  const project = parsed.positional[1];
+  return project
+    ? api(
+        context.config,
+        "GET",
+        `/projects/${apiPath(String(project))}/issues?${query}`,
+      )
+    : api(context.config, "GET", `/issues?${query}`);
+}
+
+async function issueDetailCommand(context, parsed) {
+  const usage = "ao issue <PROJECT> <NUMBER> [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "GET",
+    `/projects/${apiPath(project)}/issues/${number}`,
+  );
+}
+
+async function issueCommentCommand(context, parsed) {
+  const usage =
+    "ao issue-comment <PROJECT> <NUMBER> --body TEXT [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["body", "repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues/${number}/comments`,
+    {
+      body: requireOption(parsed, "body"),
+      ...issueIdentity(context),
+    },
+  );
+}
+
+async function issueCloseCommand(context, parsed) {
+  const usage =
+    "ao issue-close <PROJECT> <NUMBER> --reason TEXT [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["reason", "repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues/${number}/close`,
+    {
+      reason: requireOption(parsed, "reason"),
+      ...issueIdentity(context),
+    },
+  );
+}
+
+async function issueReopenCommand(context, parsed) {
+  const usage = "ao issue-reopen <PROJECT> <NUMBER> [--repo PATH]";
+  rejectUnknownOptions(parsed, new Set(["repo"]));
+  assertPositionalCount(parsed, 3, usage);
+  const project = requiredArgument(parsed, 1, usage);
+  const number = issueNumberArgument(parsed, 2, usage);
+  return api(
+    context.config,
+    "POST",
+    `/projects/${apiPath(project)}/issues/${number}/reopen`,
+    {},
   );
 }
 
@@ -1569,6 +1708,30 @@ export async function main(argv) {
   }
 
   const context = loadContext(parsed);
+  if (command === "issue-create") {
+    print(await issueCreateCommand(context, parsed));
+    return;
+  }
+  if (command === "issues") {
+    print(await issuesCommand(context, parsed));
+    return;
+  }
+  if (command === "issue") {
+    print(await issueDetailCommand(context, parsed));
+    return;
+  }
+  if (command === "issue-comment") {
+    print(await issueCommentCommand(context, parsed));
+    return;
+  }
+  if (command === "issue-close") {
+    print(await issueCloseCommand(context, parsed));
+    return;
+  }
+  if (command === "issue-reopen") {
+    print(await issueReopenCommand(context, parsed));
+    return;
+  }
   if (command === "pull") {
     await activeHeartbeat(context, parsed);
     print(

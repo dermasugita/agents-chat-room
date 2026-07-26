@@ -70,7 +70,7 @@ test("database connections enforce WAL, foreign keys, and busy timeout", () => {
   });
 });
 
-test("schema version 1 migrates expected-participant columns without losing work", () => {
+test("schema version 1 migrates expected-participant and issue tables without losing work", () => {
   const path = join(temporaryDirectory, "schema-v1.sqlite");
   const legacy = new DatabaseSync(path);
   legacy.exec(`
@@ -101,7 +101,7 @@ test("schema version 1 migrates expected-participant columns without losing work
   const migrated = createDatabase(path);
   assert.equal(
     migrated.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version,
-    2,
+    3,
   );
   assert.deepEqual(
     {
@@ -119,7 +119,226 @@ test("schema version 1 migrates expected-participant columns without losing work
       expected_participant_role: null,
     },
   );
+  assert.deepEqual(
+    migrated
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name IN ('issue', 'issue_comment')
+         ORDER BY name`,
+      )
+      .all()
+      .map(({ name }) => name),
+    ["issue", "issue_comment"],
+  );
   migrated.close();
+});
+
+test("schema version 2 migrates issue tables without losing projects", () => {
+  const path = join(temporaryDirectory, "schema-v2.sqlite");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE schema_meta(version INTEGER NOT NULL, migrated_at TEXT NOT NULL);
+    INSERT INTO schema_meta VALUES (2, '2026-07-25T00:00:00.000Z');
+    CREATE TABLE project(
+      id INTEGER PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE work(
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES project(id),
+      slug TEXT NOT NULL,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      expected_participant_identifier TEXT,
+      expected_participant_role TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(project_id, slug)
+    );
+    INSERT INTO project VALUES (1, 'legacy-v2', 'Legacy v2', '2026-07-25T00:00:00.000Z');
+  `);
+  legacy.close();
+
+  const migrated = createDatabase(path);
+  assert.equal(
+    migrated.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version,
+    3,
+  );
+  assert.equal(
+    migrated.prepare("SELECT name FROM project WHERE slug = 'legacy-v2'").get().name,
+    "Legacy v2",
+  );
+  assert.deepEqual(
+    migrated
+      .prepare(
+        `SELECT name FROM sqlite_master
+         WHERE type = 'table' AND name IN ('issue', 'issue_comment')
+         ORDER BY name`,
+      )
+      .all()
+      .map(({ name }) => name),
+    ["issue", "issue_comment"],
+  );
+  migrated.close();
+});
+
+test("issues support cross-project origin, comments, state changes, filters, and independent work state", async () => {
+  store.createProject({ slug: "target", name: "Target" });
+  const question = post("work-one", {
+    type: "question",
+    body: "Keep the work ball independent",
+    to: ["impl-guard"],
+  });
+  assert.equal(question.seq, 1);
+  store.poll("sample", "work-one", "impl-guard", "implementer");
+  currentTime = new Date(currentTime.getTime() + 3 * 60_000 + 1);
+  const beforeIssue = store.poll(
+    "sample",
+    "work-one",
+    "impl-guard",
+    undefined,
+    0,
+    false,
+  );
+
+  await withServer(async (base) => {
+    const identity = {
+      origin_project: "sample",
+      origin_identifier: "impl-guard",
+      origin_role: "implementer",
+      origin_work: "work-one",
+    };
+    const count = 12;
+    const created = await Promise.all(
+      Array.from({ length: count }, (_, index) =>
+        request(base, "POST", "/api/v1/projects/target/issues", {
+          title: `Issue ${index + 1}`,
+          body: `Body ${index + 1}`,
+          created_at: "2000-01-01T00:00:00.000Z",
+          ...identity,
+        }),
+      ),
+    );
+    assert.ok(created.every(({ status }) => status === 201));
+    assert.deepEqual(
+      created.map(({ body }) => body.number).sort((left, right) => left - right),
+      Array.from({ length: count }, (_, index) => index + 1),
+    );
+    assert.ok(
+      created.every(
+        ({ body }) =>
+          body.project === "target" &&
+          body.origin_project === "sample" &&
+          body.origin_identifier === "impl-guard" &&
+          body.origin_role === "implementer" &&
+          body.origin_work === "work-one" &&
+          body.created_at === "2026-07-26T00:03:00.001Z",
+      ),
+    );
+
+    const comments = await Promise.all(
+      Array.from({ length: 10 }, (_, index) =>
+        request(base, "POST", "/api/v1/projects/target/issues/1/comments", {
+          body: `Comment ${index + 1}`,
+          ...identity,
+        }),
+      ),
+    );
+    assert.ok(comments.every(({ status }) => status === 201));
+    assert.deepEqual(
+      comments.map(({ body }) => body.seq).sort((left, right) => left - right),
+      Array.from({ length: 10 }, (_, index) => index + 1),
+    );
+
+    const missingReason = await request(
+      base,
+      "POST",
+      "/api/v1/projects/target/issues/1/close",
+      identity,
+    );
+    assert.equal(missingReason.status, 400);
+
+    const closed = await request(
+      base,
+      "POST",
+      "/api/v1/projects/target/issues/1/close",
+      { ...identity, reason: "Implemented" },
+    );
+    assert.equal(closed.status, 200);
+    assert.equal(closed.body.state, "closed");
+    assert.equal(closed.body.closed_by, "sample/impl-guard");
+    assert.equal(closed.body.close_reason, "Implemented");
+    assert.equal(closed.body.comments.length, 10);
+
+    const open = await request(
+      base,
+      "GET",
+      "/api/v1/projects/target/issues",
+    );
+    assert.equal(open.status, 200);
+    assert.equal(open.body.issues.length, count - 1);
+    assert.ok(open.body.issues.every(({ state }) => state === "open"));
+
+    const closedList = await request(
+      base,
+      "GET",
+      "/api/v1/projects/target/issues?state=closed",
+    );
+    assert.deepEqual(
+      closedList.body.issues.map(({ number }) => number),
+      [1],
+    );
+    const across = await request(base, "GET", "/api/v1/issues?state=all");
+    assert.deepEqual(
+      across.body.projects.map(({ project }) => project.slug),
+      ["target"],
+    );
+    assert.equal(across.body.projects[0].issues.length, count);
+
+    const reopened = await request(
+      base,
+      "POST",
+      "/api/v1/projects/target/issues/1/reopen",
+      {},
+    );
+    assert.equal(reopened.status, 200);
+    assert.equal(reopened.body.state, "open");
+    assert.equal(reopened.body.closed_at, null);
+    assert.equal(reopened.body.closed_by, null);
+    assert.equal(reopened.body.close_reason, null);
+
+    const deletion = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/target/issues/1",
+    );
+    assert.equal(deletion.status, 404);
+    assert.equal(store.getIssue("target", 1).state, "open");
+  });
+
+  const afterIssue = store.poll(
+    "sample",
+    "work-one",
+    "impl-guard",
+    undefined,
+    0,
+    false,
+  );
+  assert.deepEqual(
+    {
+      your_ball: afterIssue.your_ball,
+      idle_nudge: afterIssue.idle_nudge,
+      abandoned: afterIssue.abandoned,
+      messages: afterIssue.messages,
+    },
+    {
+      your_ball: beforeIssue.your_ball,
+      idle_nudge: beforeIssue.idle_nudge,
+      abandoned: beforeIssue.abandoned,
+      messages: beforeIssue.messages,
+    },
+  );
 });
 
 test("room listing exposes the expected implementer and independent presence state", async () => {
@@ -220,6 +439,20 @@ test("project deletion requires confirmation and reports every cascaded row", as
     to: [],
     refs: [],
   });
+  const issue = store.createIssue("delete-project", {
+    title: "Delete this issue",
+    body: "The project deletion owns this row.",
+    origin_project: "sample",
+    origin_identifier: "designer",
+    origin_role: "designer",
+    origin_work: "work-one",
+  });
+  store.addIssueComment("delete-project", issue.number, {
+    body: "Delete this comment too.",
+    origin_project: "sample",
+    origin_identifier: "designer",
+    origin_role: "designer",
+  });
 
   await withServer(async (base) => {
     const missing = await request(
@@ -254,6 +487,8 @@ test("project deletion requires confirmation and reports every cascaded row", as
         participants: 2,
         documents: 3,
         revisions: 3,
+        issues: 1,
+        issue_comments: 1,
         message_recipients: 1,
         message_refs: 1,
         message_expectations: 1,
@@ -386,6 +621,8 @@ test("work deletion removes its thread and documents but preserves the project",
         participants: 1,
         documents: 1,
         revisions: 1,
+        issues: 0,
+        issue_comments: 0,
         message_recipients: 1,
         message_refs: 1,
         message_expectations: 2,

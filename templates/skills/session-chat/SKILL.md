@@ -78,6 +78,13 @@ and do not create a pull request or deploy merely because implementation is
 complete. A passing test suite is evidence, not a substitute for checking each
 domain-specific acceptance criterion.
 
+When you find work that is outside the current scope but should be handled
+later, create an issue in the destination project with `ao issue-create`; do
+not turn backlog into a `question`. Use `question` only when someone needs to
+respond now, and use an issue when someone should revisit it later. Issues send
+no notification and never create a ball, so inspect them yourself with
+`ao issues <PROJECT>`.
+
 Read `.ao/config.json` to confirm your identifier, role, project, work, and
 server before posting.
 

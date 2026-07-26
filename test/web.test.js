@@ -272,3 +272,134 @@ test("work page exposes conversation, reply links, and participant state", async
     /Conversation|Participants|Post as owner|no heartbeat/,
   );
 });
+
+test("web exposes cross-project and project issue views with owner lifecycle forms", async () => {
+  const projectBefore = await (
+    await fetch(`${base}/projects/web-project`)
+  ).text();
+  assert.match(
+    projectBefore,
+    /href="\/projects\/web-project\/issues"[^>]*>課題 <span class="meta">open 0<\/span>/,
+  );
+
+  const created = await fetch(`${base}/projects/web-project/issues`, {
+    method: "POST",
+    body: new URLSearchParams({
+      title: "Web issue",
+      body: "Owner-created **issue**.",
+    }),
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    redirect: "manual",
+  });
+  assert.equal(created.status, 303);
+  assert.equal(created.headers.get("location"), "/projects/web-project/issues/1");
+  assert.deepEqual(
+    (({
+      project,
+      number,
+      origin_project,
+      origin_identifier,
+      origin_role,
+      state,
+    }) => ({
+      project,
+      number,
+      origin_project,
+      origin_identifier,
+      origin_role,
+      state,
+    }))(store.getIssue("web-project", 1)),
+    {
+      project: "web-project",
+      number: 1,
+      origin_project: "web-project",
+      origin_identifier: "owner",
+      origin_role: "owner",
+      state: "open",
+    },
+  );
+
+  const crossProject = await (await fetch(`${base}/issues`)).text();
+  assert.match(crossProject, /未対応の課題/);
+  assert.match(crossProject, /Web issue/);
+  assert.match(crossProject, /web-project\/owner/);
+  assert.match(crossProject, /<span class="badge">open<\/span>/);
+  assert.match(
+    crossProject,
+    /sidebar-cross-issues is-active" href="\/issues" aria-current="page"/,
+  );
+
+  const openList = await (
+    await fetch(`${base}/projects/web-project/issues`)
+  ).text();
+  assert.match(openList, /Web projectの課題/);
+  assert.match(openList, /未対応 \(open\)/);
+  assert.match(openList, /クローズ済み \(closed\)/);
+  assert.match(openList, /すべて \(all\)/);
+  assert.match(openList, /オーナーとして起票/);
+  assert.match(
+    openList,
+    /sidebar-issues is-active"[\s\S]*?aria-current="page">課題/,
+  );
+
+  const commented = await fetch(
+    `${base}/projects/web-project/issues/1/comments`,
+    {
+      method: "POST",
+      body: new URLSearchParams({ body: "Owner comment" }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      redirect: "manual",
+    },
+  );
+  assert.equal(commented.status, 303);
+
+  const rejectedClose = await fetch(
+    `${base}/projects/web-project/issues/1/close`,
+    {
+      method: "POST",
+      body: new URLSearchParams(),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      redirect: "manual",
+    },
+  );
+  assert.equal(rejectedClose.status, 400);
+
+  const closed = await fetch(
+    `${base}/projects/web-project/issues/1/close`,
+    {
+      method: "POST",
+      body: new URLSearchParams({ reason: "対応済み" }),
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      redirect: "manual",
+    },
+  );
+  assert.equal(closed.status, 303);
+
+  const detail = await (
+    await fetch(`${base}/projects/web-project/issues/1`)
+  ).text();
+  assert.match(detail, /Owner-created <strong>issue<\/strong>/);
+  assert.match(detail, /コメント #1/);
+  assert.match(detail, /Owner comment/);
+  assert.match(detail, /<span class="badge">closed<\/span>/);
+  assert.match(detail, /クローズ理由:<\/strong> 対応済み/);
+  assert.match(detail, /web-project\/owner/);
+  assert.match(detail, /再オープン/);
+
+  const defaultAfterClose = await (
+    await fetch(`${base}/projects/web-project/issues`)
+  ).text();
+  assert.doesNotMatch(defaultAfterClose, /#1 Web issue/);
+  const closedList = await (
+    await fetch(`${base}/projects/web-project/issues?state=closed`)
+  ).text();
+  assert.match(closedList, /#1 Web issue/);
+  assert.match(closedList, /<span class="badge">closed<\/span>/);
+
+  const reopened = await fetch(
+    `${base}/projects/web-project/issues/1/reopen`,
+    { method: "POST", redirect: "manual" },
+  );
+  assert.equal(reopened.status, 303);
+  assert.equal(store.getIssue("web-project", 1).state, "open");
+});

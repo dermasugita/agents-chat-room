@@ -2,7 +2,44 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
+
+const ISSUE_SCHEMA = `
+CREATE TABLE IF NOT EXISTS issue (
+  id                INTEGER PRIMARY KEY,
+  project_id        INTEGER NOT NULL REFERENCES project(id),
+  number            INTEGER NOT NULL,
+  title             TEXT NOT NULL,
+  body              TEXT NOT NULL,
+  state             TEXT NOT NULL CHECK (state IN ('open','closed')),
+  origin_project    TEXT NOT NULL,
+  origin_identifier TEXT NOT NULL,
+  origin_role       TEXT NOT NULL CHECK (origin_role IN ('owner','designer','implementer')),
+  origin_work       TEXT,
+  created_at        TEXT NOT NULL,
+  closed_at         TEXT,
+  closed_by         TEXT,
+  close_reason      TEXT,
+  UNIQUE (project_id, number)
+);
+
+CREATE TABLE IF NOT EXISTS issue_comment (
+  id                INTEGER PRIMARY KEY,
+  issue_id          INTEGER NOT NULL REFERENCES issue(id),
+  seq               INTEGER NOT NULL,
+  body              TEXT NOT NULL,
+  origin_project    TEXT NOT NULL,
+  origin_identifier TEXT NOT NULL,
+  origin_role       TEXT NOT NULL CHECK (origin_role IN ('owner','designer','implementer')),
+  created_at        TEXT NOT NULL,
+  UNIQUE (issue_id, seq)
+);
+
+CREATE INDEX IF NOT EXISTS idx_issue_project_state_number
+  ON issue(project_id, state, number);
+CREATE INDEX IF NOT EXISTS idx_issue_comment_issue_seq
+  ON issue_comment(issue_id, seq);
+`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -120,6 +157,7 @@ CREATE INDEX IF NOT EXISTS idx_message_work_seq ON message(work_id, seq);
 CREATE INDEX IF NOT EXISTS idx_message_reply ON message(work_id, reply_to_seq, from_identifier);
 CREATE INDEX IF NOT EXISTS idx_message_to_identifier ON message_to(identifier, message_id);
 CREATE INDEX IF NOT EXISTS idx_participant_work ON participant(work_id, identifier);
+${ISSUE_SCHEMA}
 `;
 
 export function createDatabase(path = ":memory:") {
@@ -150,6 +188,23 @@ export function createDatabase(path = ":memory:") {
         `ALTER TABLE work ADD COLUMN expected_participant_role TEXT
          CHECK (expected_participant_role IN ('owner','designer','implementer'))`,
       );
+      database.prepare(
+        "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
+      ).run(2, new Date().toISOString());
+      database.exec(ISSUE_SCHEMA);
+      database.prepare(
+        "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
+      ).run(SCHEMA_VERSION, new Date().toISOString());
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      database.close();
+      throw error;
+    }
+  } else if (current === 2) {
+    database.exec("BEGIN IMMEDIATE");
+    try {
+      database.exec(ISSUE_SCHEMA);
       database.prepare(
         "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
       ).run(SCHEMA_VERSION, new Date().toISOString());
