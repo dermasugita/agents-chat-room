@@ -147,6 +147,61 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
   }
 });
 
+test("inject creates or reuses --work and the repository is immediately usable", async () => {
+  const repository = makeRepository("inject-work");
+  const injectArgs = [
+    "inject",
+    repository,
+    "--server",
+    serverUrl,
+    "--project",
+    "inject-work-project",
+    "--identifier",
+    "inject-worker",
+    "--role",
+    "implementer",
+    "--work",
+    "implementation",
+    "--work-title",
+    "Implementation title",
+  ];
+
+  const first = await runCli(injectArgs, temporaryDirectory);
+  assert.equal(first.code, 0, first.stderr);
+  assert.equal(JSON.parse(first.stdout).work.title, "Implementation title");
+  assert.deepEqual(
+    store.getProject("inject-work-project").works.map(({ slug, title }) => ({
+      slug,
+      title,
+    })),
+    [{ slug: "implementation", title: "Implementation title" }],
+  );
+
+  const second = await runCli(
+    [
+      ...injectArgs.slice(0, -1),
+      "A replacement title must not overwrite an existing work",
+    ],
+    temporaryDirectory,
+  );
+  assert.equal(second.code, 0, second.stderr);
+  assert.equal(JSON.parse(second.stdout).work.title, "Implementation title");
+  assert.equal(store.getProject("inject-work-project").works.length, 1);
+
+  const posted = await runCli(
+    ["post", "--type", "message", "--body", "usable immediately"],
+    repository,
+  );
+  assert.equal(posted.code, 0, posted.stderr);
+
+  const watched = await runCli(["watch", "--once"], repository);
+  assert.equal(watched.code, 0, watched.stderr);
+  assert.match(
+    watched.stdout,
+    /MESSAGE seq=1 type=message from=inject-worker .*body="usable immediately"/,
+  );
+});
+
 test("editing a copy alone does not update the source and pull protects it", async () => {
   const repository = makeRepository("pull-protection");
   await injectRepository(repository, "impl-b");

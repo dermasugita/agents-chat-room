@@ -24,7 +24,7 @@ const TEMPLATE_ROOT = resolve(
 const HELP = `agents-chat-room CLI
 
 Usage:
-  ao inject <repo> --server URL --identifier ID --role ROLE [--project SLUG] [--work SLUG]
+  ao inject <repo> --server URL --identifier ID --role ROLE [--project SLUG] [--work SLUG] [--work-title TITLE]
   ao pull [DOC] [--force] [--repo PATH]
   ao push <DOC> [--note TEXT] [--repo PATH]
   ao post --type TYPE --body TEXT [--to ID[,ID]] [--reply-to SEQ] [--ball ID[,ID]]
@@ -625,12 +625,25 @@ async function inject(parsed) {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "");
+  const selectedWork = option(parsed, "work");
+  if (
+    hasOption(parsed, "work") &&
+    (selectedWork === true || selectedWork === "")
+  ) {
+    throw new CliError("--work requires a value");
+  }
+  if (hasOption(parsed, "work-title") && !hasOption(parsed, "work")) {
+    throw new CliError("--work-title requires --work");
+  }
+  const selectedWorkTitle = hasOption(parsed, "work-title")
+    ? requireOption(parsed, "work-title")
+    : undefined;
   const config = {
     server_url: String(option(parsed, "server", "http://127.0.0.1:7331")),
     project: String(project),
     identifier: requireOption(parsed, "identifier"),
     role: requireOption(parsed, "role"),
-    ...(option(parsed, "work") ? { work: String(option(parsed, "work")) } : {}),
+    ...(selectedWork ? { work: String(selectedWork) } : {}),
   };
   if (!["owner", "designer", "implementer"].includes(config.role)) {
     throw new CliError("--role must be owner, designer, or implementer");
@@ -648,6 +661,34 @@ async function inject(parsed) {
     await api(config, "GET", `/projects/${apiPath(config.project)}`);
   }
 
+  let work;
+  if (config.work) {
+    try {
+      work = await api(
+        config,
+        "POST",
+        `/projects/${apiPath(config.project)}/works`,
+        {
+          slug: config.work,
+          title: selectedWorkTitle ?? config.work,
+        },
+      );
+    } catch (error) {
+      if (
+        !(error instanceof ApiError) ||
+        error.status !== 409 ||
+        error.body?.error !== "work_exists"
+      ) {
+        throw error;
+      }
+      work = await api(
+        config,
+        "GET",
+        `/projects/${apiPath(config.project)}/works/${apiPath(config.work)}`,
+      );
+    }
+  }
+
   mkdirSync(join(repository, ".ao", "docs"), { recursive: true });
   writeJson(join(repository, ".ao", "config.json"), config);
   const context = {
@@ -659,7 +700,13 @@ async function inject(parsed) {
   ensureIgnored(repository);
   const documents = await pullDocuments(context, undefined, true);
   const candidates = importCandidates(repository);
-  return { candidates, documents: documents.length, project: config.project, skills };
+  return {
+    candidates,
+    documents: documents.length,
+    project: config.project,
+    skills,
+    ...(work ? { work } : {}),
+  };
 }
 
 function parseExpectations(parsed) {

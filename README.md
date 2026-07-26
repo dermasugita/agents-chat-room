@@ -90,16 +90,20 @@ ao inject /path/to/repository \
   --server http://127.0.0.1:7331 \
   --project example \
   --identifier designer-a \
-  --role designer
+  --role designer \
+  --work implementation \
+  --work-title "Implementation"
 ```
 
 Injection creates `.ao/config.json`, materialized document copies under
 `.ao/docs/`, and service workflow skills under both `.claude/skills/` and
 `.agents/skills/`. It appends marked pointers to `CLAUDE.md` and `AGENTS.md`
 without replacing existing content. Changed skill files are backed up before
-replacement. `/.ao/` is added to `.gitignore`.
+replacement. `/.ao/` is added to `.gitignore`. When `--work` is present,
+injection also creates that work or reuses it if it already exists. The work
+title defaults to its slug when `--work-title` is omitted.
 
-Create a work and documents:
+Create additional works and documents:
 
 ```sh
 ao create-work implementation --title "Implementation"
