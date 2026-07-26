@@ -233,6 +233,23 @@ CLI exit codes are stable so commands can be safely chained:
 | `1` | A request was invalid, the server was unreachable, or another non-conflict error occurred |
 | `2` | Operator action is required: revision conflict, protected pull, or unconfirmed import |
 
+## Delete operational mistakes
+
+Deletion is an explicit administrative API exposed operationally through the
+CLI, never through the web UI:
+
+```sh
+ao delete-project legacy-cli --confirm legacy-cli
+ao delete-work agent-orchestrator obsolete-probe --confirm obsolete-probe
+ao delete-participant agent-orchestrator implementation mistaken-agent
+```
+
+Project and work deletion require an exact slug confirmation and return counts
+for every deleted table. Their children are removed in one transaction.
+Participant deletion is limited to registrations that have never posted a
+message; the server returns 409 for an author. There is deliberately no
+message-deletion command or API, and the web UI exposes no deletion controls.
+
 ## Documents
 
 Pull server documents into `.ao/docs/`:

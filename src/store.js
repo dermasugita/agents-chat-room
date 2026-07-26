@@ -484,6 +484,205 @@ export function createStore(database, options = {}) {
     return serializeWork({ ...work, state: "resolved" });
   }
 
+  function emptyDeletionCounts() {
+    return {
+      projects: 0,
+      works: 0,
+      messages: 0,
+      participants: 0,
+      documents: 0,
+      revisions: 0,
+      message_recipients: 0,
+      message_refs: 0,
+      message_expectations: 0,
+      ball_declarations: 0,
+    };
+  }
+
+  function deletedRows(sql, ...parameters) {
+    return Number(database.prepare(sql).run(...parameters).changes);
+  }
+
+  function requireDeletionConfirmation(slug, confirmation) {
+    assert(
+      confirmation === slug,
+      400,
+      "confirmation_required",
+      `confirm must exactly match the target slug: ${slug}`,
+      { expected_confirm: slug },
+    );
+  }
+
+  function deleteProject(projectSlug, confirmation) {
+    requireDeletionConfirmation(projectSlug, confirmation);
+    return inTransaction(database, () => {
+      const project = projectBySlug(projectSlug);
+      const deleted = emptyDeletionCounts();
+      const messageIds = `
+        SELECT message.id
+        FROM message
+        JOIN work ON work.id = message.work_id
+        WHERE work.project_id = ?
+      `;
+      const documentIds =
+        "SELECT id FROM document WHERE project_id = ?";
+      const workIds = "SELECT id FROM work WHERE project_id = ?";
+
+      deleted.message_recipients = deletedRows(
+        `DELETE FROM message_to WHERE message_id IN (${messageIds})`,
+        project.id,
+      );
+      deleted.message_refs = deletedRows(
+        `DELETE FROM message_ref WHERE message_id IN (${messageIds})`,
+        project.id,
+      );
+      deleted.ball_declarations = deletedRows(
+        `DELETE FROM ball_declaration WHERE message_id IN (${messageIds})`,
+        project.id,
+      );
+      deleted.message_expectations = deletedRows(
+        `DELETE FROM message_expects
+         WHERE message_id IN (${messageIds})
+            OR document_id IN (${documentIds})`,
+        project.id,
+        project.id,
+      );
+      deleted.messages = deletedRows(
+        `DELETE FROM message WHERE id IN (${messageIds})`,
+        project.id,
+      );
+      deleted.revisions = deletedRows(
+        `DELETE FROM revision WHERE document_id IN (${documentIds})`,
+        project.id,
+      );
+      deleted.participants = deletedRows(
+        `DELETE FROM participant WHERE work_id IN (${workIds})`,
+        project.id,
+      );
+      deleted.documents = deletedRows(
+        "DELETE FROM document WHERE project_id = ?",
+        project.id,
+      );
+      deleted.works = deletedRows(
+        "DELETE FROM work WHERE project_id = ?",
+        project.id,
+      );
+      deleted.projects = deletedRows(
+        "DELETE FROM project WHERE id = ?",
+        project.id,
+      );
+
+      return {
+        target: { project: projectSlug },
+        deleted,
+      };
+    });
+  }
+
+  function deleteWork(projectSlug, workSlug, confirmation) {
+    requireDeletionConfirmation(workSlug, confirmation);
+    return inTransaction(database, () => {
+      const work = workBySlug(projectSlug, workSlug);
+      const deleted = emptyDeletionCounts();
+      const messageIds = "SELECT id FROM message WHERE work_id = ?";
+      const documentIds = "SELECT id FROM document WHERE work_id = ?";
+
+      deleted.message_recipients = deletedRows(
+        `DELETE FROM message_to WHERE message_id IN (${messageIds})`,
+        work.id,
+      );
+      deleted.message_refs = deletedRows(
+        `DELETE FROM message_ref WHERE message_id IN (${messageIds})`,
+        work.id,
+      );
+      deleted.ball_declarations = deletedRows(
+        `DELETE FROM ball_declaration WHERE message_id IN (${messageIds})`,
+        work.id,
+      );
+      deleted.message_expectations = deletedRows(
+        `DELETE FROM message_expects
+         WHERE message_id IN (${messageIds})
+            OR document_id IN (${documentIds})`,
+        work.id,
+        work.id,
+      );
+      deleted.messages = deletedRows(
+        "DELETE FROM message WHERE work_id = ?",
+        work.id,
+      );
+      deleted.revisions = deletedRows(
+        `DELETE FROM revision WHERE document_id IN (${documentIds})`,
+        work.id,
+      );
+      deleted.participants = deletedRows(
+        "DELETE FROM participant WHERE work_id = ?",
+        work.id,
+      );
+      deleted.documents = deletedRows(
+        "DELETE FROM document WHERE work_id = ?",
+        work.id,
+      );
+      deleted.works = deletedRows("DELETE FROM work WHERE id = ?", work.id);
+
+      return {
+        target: { project: projectSlug, work: workSlug },
+        deleted,
+      };
+    });
+  }
+
+  function deleteParticipant(projectSlug, workSlug, identifier) {
+    assert(
+      typeof identifier === "string" && identifier.length > 0,
+      400,
+      "invalid_request",
+      "participant identifier is required",
+    );
+    return inTransaction(database, () => {
+      const work = workBySlug(projectSlug, workSlug);
+      const participant = database
+        .prepare(
+          `SELECT id FROM participant
+           WHERE work_id = ? AND identifier = ?`,
+        )
+        .get(work.id, identifier);
+      assert(
+        participant,
+        404,
+        "participant_not_found",
+        `Participant not found: ${projectSlug}/${workSlug}/${identifier}`,
+      );
+      const messageCount = Number(
+        database
+          .prepare(
+            `SELECT COUNT(*) AS count FROM message
+             WHERE work_id = ? AND from_identifier = ?`,
+          )
+          .get(work.id, identifier).count,
+      );
+      assert(
+        messageCount === 0,
+        409,
+        "participant_has_messages",
+        `Participant cannot be deleted after posting messages: ${identifier}`,
+        { message_count: messageCount },
+      );
+      const deleted = emptyDeletionCounts();
+      deleted.participants = deletedRows(
+        "DELETE FROM participant WHERE id = ?",
+        participant.id,
+      );
+      return {
+        target: {
+          project: projectSlug,
+          work: workSlug,
+          participant: identifier,
+        },
+        deleted,
+      };
+    });
+  }
+
   function listRooms() {
     return database
       .prepare(
@@ -1593,6 +1792,9 @@ export function createStore(database, options = {}) {
     createDocument,
     createProject,
     createWork,
+    deleteParticipant,
+    deleteProject,
+    deleteWork,
     getDocument,
     getProject,
     getWork,

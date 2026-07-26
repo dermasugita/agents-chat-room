@@ -101,9 +101,20 @@ async function routeApi(request, response, url, store) {
   }
 
   let match = path.match(/^\/api\/v1\/projects\/([^/]+)$/);
-  if (match && method === "GET") {
-    json(response, 200, store.getProject(decode(match[1])));
-    return true;
+  if (match) {
+    const project = decode(match[1]);
+    if (method === "GET") {
+      json(response, 200, store.getProject(project));
+      return true;
+    }
+    if (method === "DELETE") {
+      json(
+        response,
+        200,
+        store.deleteProject(project, url.searchParams.get("confirm")),
+      );
+      return true;
+    }
   }
 
   match = path.match(/^\/api\/v1\/projects\/([^/]+)\/works$/);
@@ -113,8 +124,40 @@ async function routeApi(request, response, url, store) {
   }
 
   match = path.match(/^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)$/);
-  if (match && method === "GET") {
-    json(response, 200, store.getWork(decode(match[1]), decode(match[2])));
+  if (match) {
+    const project = decode(match[1]);
+    const work = decode(match[2]);
+    if (method === "GET") {
+      json(response, 200, store.getWork(project, work));
+      return true;
+    }
+    if (method === "DELETE") {
+      json(
+        response,
+        200,
+        store.deleteWork(
+          project,
+          work,
+          url.searchParams.get("confirm"),
+        ),
+      );
+      return true;
+    }
+  }
+
+  match = path.match(
+    /^\/api\/v1\/projects\/([^/]+)\/works\/([^/]+)\/participants\/([^/]+)$/,
+  );
+  if (match && method === "DELETE") {
+    json(
+      response,
+      200,
+      store.deleteParticipant(
+        decode(match[1]),
+        decode(match[2]),
+        decode(match[3]),
+      ),
+    );
     return true;
   }
 

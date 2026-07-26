@@ -177,6 +177,283 @@ test("room listing exposes the expected implementer and independent presence sta
   });
 });
 
+test("project deletion requires confirmation and reports every cascaded row", async () => {
+  store.createProject({ slug: "delete-project", name: "Delete project" });
+  store.createWork("delete-project", { slug: "alpha", title: "Alpha" });
+  store.createWork("delete-project", { slug: "beta", title: "Beta" });
+  store.createDocument("delete-project", {
+    kind: "context",
+    title: "Context",
+    body: "context",
+    author: "designer",
+  });
+  store.createDocument("delete-project", {
+    kind: "adr",
+    title: "Decision",
+    body: "decision",
+    author: "designer",
+  });
+  store.createDocument("delete-project", {
+    kind: "handoff",
+    slug: "alpha",
+    title: "Alpha handoff",
+    body: "handoff",
+    author: "designer",
+  });
+  store.postMessage("delete-project", "alpha", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "status",
+    body: "alpha",
+    to: ["owner"],
+    refs: ["context"],
+    ball: ["designer"],
+    expects: [{ doc: "context", revision: 1 }],
+  });
+  store.postMessage("delete-project", "beta", {
+    idempotency_key: crypto.randomUUID(),
+    from: "implementer",
+    role: "implementer",
+    type: "status",
+    body: "beta",
+    to: [],
+    refs: [],
+  });
+
+  await withServer(async (base) => {
+    const missing = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/delete-project",
+    );
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.error, "confirmation_required");
+    assert.equal(missing.body.expected_confirm, "delete-project");
+
+    const wrong = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/delete-project?confirm=another-project",
+    );
+    assert.equal(wrong.status, 400);
+    assert.equal(store.getProject("delete-project").works.length, 2);
+
+    const result = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/delete-project?confirm=delete-project",
+    );
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, {
+      target: { project: "delete-project" },
+      deleted: {
+        projects: 1,
+        works: 2,
+        messages: 2,
+        participants: 2,
+        documents: 3,
+        revisions: 3,
+        message_recipients: 1,
+        message_refs: 1,
+        message_expectations: 1,
+        ball_declarations: 1,
+      },
+    });
+    const absent = await request(
+      base,
+      "GET",
+      "/api/v1/projects/delete-project",
+    );
+    assert.equal(absent.status, 404);
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  });
+});
+
+test("project deletion rolls every child deletion back after a later failure", () => {
+  store.createProject({ slug: "rollback-delete", name: "Rollback delete" });
+  store.createWork("rollback-delete", { slug: "work", title: "Work" });
+  store.createDocument("rollback-delete", {
+    kind: "handoff",
+    slug: "work",
+    title: "Handoff",
+    body: "body",
+    author: "designer",
+  });
+  store.postMessage("rollback-delete", "work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "status",
+    body: "keep me",
+    to: ["owner"],
+    refs: ["handoff/work"],
+  });
+  const workId = database
+    .prepare(
+      `SELECT work.id
+       FROM work JOIN project ON project.id = work.project_id
+       WHERE project.slug = 'rollback-delete' AND work.slug = 'work'`,
+    )
+    .get().id;
+  database.exec(`
+    CREATE TEMP TRIGGER force_delete_failure
+    BEFORE DELETE ON work
+    WHEN OLD.id = ${Number(workId)}
+    BEGIN
+      SELECT RAISE(ABORT, 'forced delete failure');
+    END;
+  `);
+
+  assert.throws(
+    () => store.deleteProject("rollback-delete", "rollback-delete"),
+    /forced delete failure/,
+  );
+  assert.equal(store.getProject("rollback-delete").works.length, 1);
+  assert.equal(store.getWork("rollback-delete", "work").messages.length, 1);
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM message_to").get().count,
+    1,
+  );
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM message_ref").get().count,
+    1,
+  );
+  assert.equal(
+    database.prepare("SELECT COUNT(*) AS count FROM participant").get().count,
+    1,
+  );
+  assert.equal(
+    database
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM revision
+         JOIN document ON document.id = revision.document_id
+         JOIN project ON project.id = document.project_id
+         WHERE project.slug = 'rollback-delete'`,
+      )
+      .get().count,
+    1,
+  );
+});
+
+test("work deletion removes its thread and documents but preserves the project", async () => {
+  store.createWork("sample", { slug: "delete-work", title: "Delete work" });
+  store.createDocument("sample", {
+    kind: "handoff",
+    slug: "delete-work",
+    title: "Delete work handoff",
+    body: "handoff",
+    author: "designer",
+  });
+  store.postMessage("sample", "delete-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "status",
+    body: "delete",
+    to: ["owner"],
+    refs: ["handoff/delete-work"],
+    ball: ["designer"],
+    expects: [{ doc: "handoff/delete-work", revision: 1 }],
+  });
+  post("work-one", {
+    from: "reviewer",
+    role: "implementer",
+    expects: [{ doc: "handoff/delete-work", revision: 1 }],
+  });
+
+  await withServer(async (base) => {
+    const missing = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/sample/works/delete-work",
+    );
+    assert.equal(missing.status, 400);
+
+    const result = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/sample/works/delete-work?confirm=delete-work",
+    );
+    assert.equal(result.status, 200);
+    assert.deepEqual(result.body, {
+      target: { project: "sample", work: "delete-work" },
+      deleted: {
+        projects: 0,
+        works: 1,
+        messages: 1,
+        participants: 1,
+        documents: 1,
+        revisions: 1,
+        message_recipients: 1,
+        message_refs: 1,
+        message_expectations: 2,
+        ball_declarations: 1,
+      },
+    });
+    assert.deepEqual(
+      store.getProject("sample").works.map(({ slug }) => slug),
+      ["work-one"],
+    );
+    assert.equal(store.getWork("sample", "work-one").messages.length, 1);
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM message_expects").get().count,
+      0,
+    );
+  });
+});
+
+test("only silent participants can be deleted and messages have no delete route", async () => {
+  store.poll("sample", "work-one", "mistaken-agent", "implementer");
+  post("work-one", {
+    from: "speaker",
+    role: "implementer",
+    body: "must remain attributable",
+  });
+
+  await withServer(async (base) => {
+    const removed = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/sample/works/work-one/participants/mistaken-agent",
+    );
+    assert.equal(removed.status, 200);
+    assert.equal(removed.body.deleted.participants, 1);
+
+    const rejected = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/sample/works/work-one/participants/speaker",
+    );
+    assert.equal(rejected.status, 409);
+    assert.equal(rejected.body.error, "participant_has_messages");
+    assert.equal(rejected.body.message_count, 1);
+
+    const messageDeletion = await request(
+      base,
+      "DELETE",
+      "/api/v1/projects/sample/works/work-one/messages/1",
+    );
+    assert.equal(messageDeletion.status, 404);
+    assert.equal(store.getWork("sample", "work-one").messages.length, 1);
+    assert.deepEqual(
+      store
+        .participantStates(
+          database
+            .prepare(
+              `SELECT work.id FROM work
+               JOIN project ON project.id = work.project_id
+               WHERE project.slug = 'sample' AND work.slug = 'work-one'`,
+            )
+            .get().id,
+        )
+        .map(({ identifier }) => identifier),
+      ["speaker"],
+    );
+  });
+});
+
 test("two clients updating the same base revision produce one 200 and one 409", async () => {
   store.createDocument("sample", {
     kind: "context",

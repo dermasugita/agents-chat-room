@@ -427,6 +427,111 @@ test("repository config overrides a conflicting user default in real CLI command
   assert.match(heartbeatFor("repository-priority-agent"), /^2026-/);
 });
 
+test("delete CLI commands stay on the repository server and report protected cleanup", async () => {
+  const repository = makeRepository("delete-cli-repository");
+  await injectRepository(repository, "delete-cli-agent");
+  const conflictingHome = makeRepository("delete-cli-conflicting-home");
+  mkdirSync(join(conflictingHome, ".ao"), { recursive: true });
+  writeFileSync(
+    join(conflictingHome, ".ao/config.json"),
+    `${JSON.stringify({ server_url: "http://127.0.0.1:1" }, null, 2)}\n`,
+    "utf8",
+  );
+  store.createProject({ slug: "delete-cli", name: "Delete CLI" });
+  store.createWork("delete-cli", { slug: "old-work", title: "Old work" });
+  store.poll(
+    "delete-cli",
+    "old-work",
+    "mistaken-agent",
+    "implementer",
+  );
+  store.postMessage("delete-cli", "old-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "speaker",
+    role: "implementer",
+    type: "status",
+    body: "keep attribution until the work is deleted",
+    to: [],
+    refs: [],
+  });
+  const environment = {
+    AO_SERVER_URL: "",
+    HOME: conflictingHome,
+  };
+
+  const participant = await runCli(
+    [
+      "delete-participant",
+      "delete-cli",
+      "old-work",
+      "mistaken-agent",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(participant.code, 0, participant.stderr);
+  assert.equal(JSON.parse(participant.stdout).deleted.participants, 1);
+
+  const protectedParticipant = await runCli(
+    ["delete-participant", "delete-cli", "old-work", "speaker"],
+    repository,
+    environment,
+  );
+  assert.equal(protectedParticipant.code, 2);
+  assert.match(protectedParticipant.stderr, /cannot be deleted after posting/i);
+
+  const wrongConfirmation = await runCli(
+    [
+      "delete-work",
+      "delete-cli",
+      "old-work",
+      "--confirm",
+      "another-work",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(wrongConfirmation.code, 1);
+  assert.equal(store.getWork("delete-cli", "old-work").messages.length, 1);
+
+  const work = await runCli(
+    [
+      "delete-work",
+      "delete-cli",
+      "old-work",
+      "--confirm",
+      "old-work",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(work.code, 0, work.stderr);
+  assert.deepEqual(JSON.parse(work.stdout).deleted, {
+    projects: 0,
+    works: 1,
+    messages: 1,
+    participants: 1,
+    documents: 0,
+    revisions: 0,
+    message_recipients: 0,
+    message_refs: 0,
+    message_expectations: 0,
+    ball_declarations: 0,
+  });
+
+  const project = await runCli(
+    ["delete-project", "delete-cli", "--confirm", "delete-cli"],
+    repository,
+    environment,
+  );
+  assert.equal(project.code, 0, project.stderr);
+  assert.equal(JSON.parse(project.stdout).deleted.projects, 1);
+  assert.equal(
+    store.listProjects().some(({ slug }) => slug === "delete-cli"),
+    false,
+  );
+});
+
 test("cold room join uses the declared slot, pulls context, and exposes the full thread", async () => {
   const controller = makeRepository("room-controller");
   await injectRepository(controller, "room-controller");

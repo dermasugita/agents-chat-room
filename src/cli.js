@@ -45,6 +45,9 @@ Usage:
   ao resolve
   ao create-work <SLUG> --title TITLE [--implementer ID]
   ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
+  ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]
+  ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]
+  ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]
   ao import <repo> [--yes] [--project SLUG] [--name NAME]
 
 Server resolution order is AO_SERVER_URL, repository .ao/config.json, then
@@ -390,6 +393,74 @@ async function projectsCommand(parsed) {
       `${index + 1}. ${project.slug}  ${project.name}  works=${project.work_count} documents=${project.document_count}`,
     );
   });
+}
+
+function requiredArgument(parsed, index, usage) {
+  const value = parsed.positional[index];
+  if (value === undefined || String(value).length === 0) {
+    throw new CliError(`Usage: ${usage}`);
+  }
+  return String(value);
+}
+
+async function deleteProjectCommand(parsed) {
+  const project = requiredArgument(
+    parsed,
+    1,
+    "ao delete-project <PROJECT> --confirm PROJECT [--repo PATH]",
+  );
+  const query = new URLSearchParams({
+    confirm: requireOption(parsed, "confirm"),
+  });
+  return api(
+    resolveServerUrl(parsed),
+    "DELETE",
+    `/projects/${encodeURIComponent(project)}?${query}`,
+  );
+}
+
+async function deleteWorkCommand(parsed) {
+  const project = requiredArgument(
+    parsed,
+    1,
+    "ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]",
+  );
+  const work = requiredArgument(
+    parsed,
+    2,
+    "ao delete-work <PROJECT> <WORK> --confirm WORK [--repo PATH]",
+  );
+  const query = new URLSearchParams({
+    confirm: requireOption(parsed, "confirm"),
+  });
+  return api(
+    resolveServerUrl(parsed),
+    "DELETE",
+    `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}?${query}`,
+  );
+}
+
+async function deleteParticipantCommand(parsed) {
+  const project = requiredArgument(
+    parsed,
+    1,
+    "ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]",
+  );
+  const work = requiredArgument(
+    parsed,
+    2,
+    "ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]",
+  );
+  const identifier = requiredArgument(
+    parsed,
+    3,
+    "ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]",
+  );
+  return api(
+    resolveServerUrl(parsed),
+    "DELETE",
+    `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}/participants/${encodeURIComponent(identifier)}`,
+  );
 }
 
 function projectSlug(value) {
@@ -1482,6 +1553,18 @@ export async function main(argv) {
   }
   if (command === "join") {
     print(await joinRoom(parsed));
+    return;
+  }
+  if (command === "delete-project") {
+    print(await deleteProjectCommand(parsed));
+    return;
+  }
+  if (command === "delete-work") {
+    print(await deleteWorkCommand(parsed));
+    return;
+  }
+  if (command === "delete-participant") {
+    print(await deleteParticipantCommand(parsed));
     return;
   }
 
