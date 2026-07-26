@@ -23,6 +23,7 @@ if (result.status !== 0) {
 const lines = (result.stdout ?? "").split(/\r?\n/).filter(Boolean);
 const ball = lines.find((line) => line.startsWith("BALL "));
 const idle = lines.some((line) => line.startsWith("IDLE "));
+const reasons = ball?.match(/^BALL reasons=(.*)$/)?.[1] ?? "[]";
 console.log(
-  `BALL has_ball=${Boolean(ball)} idle=${idle} reasons=${ball ? ball.slice(5) : "[]"}`,
+  `BALL has_ball=${Boolean(ball)} idle=${idle} reasons=${reasons}`,
 );

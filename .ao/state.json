@@ -46,9 +46,9 @@
       "revision": 1
     },
     "handoff/orchestrator-mvp": {
-      "body_hash": "2e56437443257482234815e627f71948c9d793614898f09a40d6f080f4e454d0",
+      "body_hash": "08b840cd13c5871e75cd72ed168c177ee93c0dcc16577ffcc3162c2042175ae3",
       "path": ".ao/docs/handoff/orchestrator-mvp.md",
-      "revision": 1
+      "revision": 7
     },
     "handoff/ui-review": {
       "body_hash": "26891cccb0d849ef4b20d53ee6b93a293c99d9d169d3048b3e451411e08e0c2e",
@@ -61,9 +61,14 @@
       "revision": 1
     },
     "handoff/issue-tracker": {
-      "body_hash": "26a3277d806d696712a51e1eb528709a31c8f2c12ba74263d3839160a9de7970",
+      "body_hash": "cbbd12911662d602e1d2e7d4769a359cb20dc17d5b1616992605d3d304f64cd3",
       "path": ".ao/docs/handoff/issue-tracker.md",
-      "revision": 3
+      "revision": 7
+    },
+    "adr/0011-adr-0011": {
+      "body_hash": "2d9b17174605632c57568bf19e796ee63f2bcf1175be4d4fc755497f38e9c784",
+      "path": ".ao/docs/adr/0011-adr-0011.md",
+      "revision": 2
     }
   },
   "server_url": "http://127.0.0.1:28100",

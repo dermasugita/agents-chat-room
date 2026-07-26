@@ -249,14 +249,23 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
       join(repository, ".agents/skills/session-chat/SKILL.md"),
       "utf8",
     ),
-    /outside the current scope[\s\S]*ao issue-create[\s\S]*question[\s\S]*no notification/,
+    // 基準82: 課題は watch が配達する。「自分で見に行け」に戻っていないことも固定する。
+    /outside the current scope[\s\S]*ao issue-create[\s\S]*question[\s\S]*`ISSUE` lines in `ao watch --once`[\s\S]*never create a ball/,
+  );
+  assert.doesNotMatch(
+    readFileSync(
+      join(repository, ".agents/skills/session-chat/SKILL.md"),
+      "utf8",
+    ),
+    /read them yourself|no notification/,
   );
   assert.match(
     readFileSync(
       join(repository, ".agents/skills/design-handoff/SKILL.md"),
       "utf8",
     ),
-    /ao issues <PROJECT>[\s\S]*Issues do not notify you or[\s\S]*startup and during every periodic/,
+    // 基準82: 起動時に全件、以後は watch の ISSUE 行。周期ループに ao issues を入れない。
+    /ao issues <PROJECT>\s+# once at startup[\s\S]*`ISSUE` lines carry new issues[\s\S]*do not have to go looking for issues in the loop/,
   );
   for (const script of [
     "post-safe.mjs",
@@ -320,6 +329,82 @@ test("inject installs config, copies, runtime-neutral skills, pointers, and igno
       1,
     );
   }
+});
+
+test("inject preserves an existing project and work unless explicitly changed", async () => {
+  store.createProject({ slug: "preserved-project", name: "Preserved project" });
+  store.createWork("preserved-project", {
+    slug: "preserved-work",
+    title: "Preserved work",
+  });
+  const repository = makeRepository("different-directory-name");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: serverUrl,
+        project: "preserved-project",
+        work: "preserved-work",
+        identifier: "preserved-agent",
+        role: "implementer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+
+  const reinjected = await runCli(
+    ["inject", repository],
+    temporaryDirectory,
+  );
+  assert.equal(reinjected.code, 0, reinjected.stderr);
+  assert.doesNotMatch(reinjected.stderr, /overwrite repository target/);
+  assert.deepEqual(
+    {
+      project: JSON.parse(
+        readFileSync(join(repository, ".ao/config.json"), "utf8"),
+      ).project,
+      work: JSON.parse(
+        readFileSync(join(repository, ".ao/config.json"), "utf8"),
+      ).work,
+    },
+    {
+      project: "preserved-project",
+      work: "preserved-work",
+    },
+  );
+
+  const changed = await runCli(
+    [
+      "inject",
+      repository,
+      "--project",
+      "replacement-project",
+      "--work",
+      "replacement-work",
+    ],
+    temporaryDirectory,
+  );
+  assert.equal(changed.code, 0, changed.stderr);
+  assert.match(
+    changed.stderr,
+    /WARNING: ao inject will overwrite repository target/,
+  );
+  assert.match(
+    changed.stderr,
+    /project "preserved-project" -> "replacement-project"/,
+  );
+  assert.match(
+    changed.stderr,
+    /work "preserved-work" -> "replacement-work"/,
+  );
+  const changedConfig = JSON.parse(
+    readFileSync(join(repository, ".ao/config.json"), "utf8"),
+  );
+  assert.equal(changedConfig.project, "replacement-project");
+  assert.equal(changedConfig.work, "replacement-work");
 });
 
 test("inject creates or reuses --work and the repository is immediately usable", async () => {
@@ -2092,7 +2177,11 @@ test("injected built-in scripts validate, monitor Japanese, loop, and check ball
     noAdditionalCliSetup,
   );
   assert.equal(ball.code, 0, ball.stderr);
-  assert.match(ball.stdout, /^BALL has_ball=true idle=false reasons=/);
+  assert.match(
+    ball.stdout,
+    /^BALL has_ball=true idle=false reasons=\[\{"kind":/,
+  );
+  assert.doesNotMatch(ball.stdout, /reasons=reasons=/);
 
   const loop = await runNodeScript(
     join(scriptRoot, "self-driven-loop.mjs"),
@@ -2408,8 +2497,15 @@ test("service skill templates contain none of the retired file protocol", () => 
     sessionSkill,
     /Never point `cli\.args` at a\s+path inside the repository/,
   );
-  assert.match(sessionSkill, /### 4\. Join from inside the worktree/);
-  assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
+  // 基準84: 新しい worktree にはヘルパが無いので、メインチェックアウトから
+  // --repo で worktree を指して実行し、そのあと cd する。逆順にすると失敗する。
+  assert.match(sessionSkill, /### 4\. Install the skills into the worktree, then enter it/);
+  assert.match(sessionSkill, /Stay in the main checkout for this command/);
+  assert.match(
+    sessionSkill,
+    /join-room\.mjs <NUMBER> --repo worktree\/<WORK>\s*\ncd worktree\/<WORK>/,
+  );
+  assert.match(sessionSkill, /ls \.claude\/skills \.agents\/skills/);
   assert.match(
     sessionSkill,
     /### 6\. Register a periodic self-check — mandatory/,
