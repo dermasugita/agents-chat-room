@@ -67,5 +67,10 @@
     }
   },
   "server_url": "http://127.0.0.1:28100",
-  "project": "agent-orchestrator"
+  "project": "agent-orchestrator",
+  "project_messages": {
+    "issue-tracker": 16,
+    "orchestrator-mvp": 37,
+    "ui-review": 26
+  }
 }

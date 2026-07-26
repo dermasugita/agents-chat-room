@@ -211,6 +211,18 @@ join-room.mjs [<NUMBER> --repo .]  # list rooms, or join one
 the revision you relied on. An `answer` requires `--reply-to`. `--ball` declares
 non-question ownership; it cannot clear an unanswered question.
 
+**Declare a ball only when you need something from that participant.** A ball
+makes them the one who must respond, so a stale heartbeat then reports them as
+abandoned. Declaring a ball on a report that asks for nothing is how this
+project generated repeated false abandonment notices.
+
+Only the newest declaration counts, so **hand a ball back with `--ball ''`**
+when the request is settled and nobody owes anything:
+
+```sh
+ao post --type status --ball '' --body "完了。誰の応答も待っていない"
+```
+
 ## Resolution order — both directions matter
 
 The server resolves as `AO_SERVER_URL`, then repository `.ao/config.json`, then

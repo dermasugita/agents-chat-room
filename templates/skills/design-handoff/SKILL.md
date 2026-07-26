@@ -136,6 +136,14 @@ Communicate through `ao post` and attach the revisions you relied on with
 in the thread. Do not take owner-only or implementer choices on behalf of
 another role.
 
+**Declare a ball only when you need something from that participant**, and hand
+it back with `--ball ''` once the request is settled. Only the newest
+declaration counts. A ball makes its holder the one who must respond, so a
+stale heartbeat then reports them as abandoned; balls left on settled requests
+are why this project produced repeated false abandonment notices. Reviewing an
+implementer's report and then leaving your own ball declared is the same
+mistake in the opposite direction.
+
 ## Self-driven monitoring
 
 Assume that no notification will wake you. After each bounded design or review
