@@ -338,10 +338,25 @@ export function createStore(database, options = {}) {
       .map((participant) => {
         const ball = ballFor(workId, participant.identifier);
         const heartbeat = participant.last_heartbeat_at ?? participant.first_seen_at;
+        const projectActivity = database
+          .prepare(
+            `SELECT MAX(
+               COALESCE(project_participant.last_heartbeat_at,
+                        project_participant.first_seen_at)
+             ) AS latest
+             FROM work AS current_work
+             JOIN work AS project_work
+               ON project_work.project_id = current_work.project_id
+             JOIN participant AS project_participant
+               ON project_participant.work_id = project_work.id
+             WHERE current_work.id = ?
+               AND project_participant.identifier = ?`,
+          )
+          .get(workId, participant.identifier).latest;
         const abandoned =
           participant.role !== "owner" &&
           ball.has_ball &&
-          new Date(heartbeat).getTime() < cutoff;
+          new Date(projectActivity ?? heartbeat).getTime() < cutoff;
         return {
           identifier: participant.identifier,
           role: participant.role,
@@ -811,6 +826,31 @@ export function createStore(database, options = {}) {
     );
   }
 
+  function deleteDocument(projectSlug, identifier, confirmation) {
+    requireDeletionConfirmation(identifier, confirmation);
+    return inTransaction(database, () => {
+      const project = projectBySlug(projectSlug);
+      const document = documentRow(project.id, identifier);
+      const deleted = emptyDeletionCounts();
+      deleted.message_expectations = deletedRows(
+        "DELETE FROM message_expects WHERE document_id = ?",
+        document.id,
+      );
+      deleted.revisions = deletedRows(
+        "DELETE FROM revision WHERE document_id = ?",
+        document.id,
+      );
+      deleted.documents = deletedRows(
+        "DELETE FROM document WHERE id = ?",
+        document.id,
+      );
+      return {
+        target: { project: projectSlug, document: identifier },
+        deleted,
+      };
+    });
+  }
+
   function workDeletionSummary(work) {
     const messageActivity = database
       .prepare(
@@ -1176,7 +1216,7 @@ export function createStore(database, options = {}) {
     const project = projectBySlug(projectSlug);
     return database
       .prepare(
-        `SELECT kind, slug, title, current_revision, created_at
+        `SELECT kind, slug, adr_number, title, current_revision, created_at
          FROM document WHERE project_id = ?
          ORDER BY CASE kind WHEN 'context' THEN 0 WHEN 'adr' THEN 1 ELSE 2 END,
                   adr_number, slug`,
@@ -1213,6 +1253,7 @@ export function createStore(database, options = {}) {
       doc: documentIdentifier(document),
       kind: document.kind,
       slug: document.slug,
+      adr_number: document.adr_number,
       title: document.title,
       body: revision.body,
       revision: revision.revision,
@@ -1270,19 +1311,52 @@ export function createStore(database, options = {}) {
         );
         slug = "context";
       } else if (input.kind === "adr") {
+        const explicitNumber =
+          input.adr_number === undefined || input.adr_number === null
+            ? null
+            : input.adr_number;
         assert(
-          input.slug === undefined,
+          explicitNumber === null ||
+            (Number.isInteger(explicitNumber) && explicitNumber > 0),
           400,
           "invalid_request",
-          "ADR slug is assigned by the server",
+          "adr_number must be a positive integer",
         );
         adrNumber =
+          explicitNumber ??
           database
             .prepare(
               "SELECT COALESCE(MAX(adr_number), 0) + 1 AS next FROM document WHERE project_id = ? AND kind = 'adr'",
             )
             .get(project.id).next;
-        slug = `${String(adrNumber).padStart(4, "0")}-${kebabCase(input.title)}`;
+        const numberPrefix = String(adrNumber).padStart(4, "0");
+        if (input.slug === undefined) {
+          slug = `${numberPrefix}-${kebabCase(input.title)}`;
+        } else {
+          assert(
+            explicitNumber !== null,
+            400,
+            "invalid_request",
+            "An explicit ADR slug requires adr_number",
+          );
+          slug = requireSlug(input.slug, "ADR slug");
+          assert(
+            slug.startsWith(`${numberPrefix}-`),
+            400,
+            "invalid_request",
+            `ADR slug must start with ${numberPrefix}-`,
+          );
+        }
+        assert(
+          !database
+            .prepare(
+              "SELECT 1 FROM document WHERE project_id = ? AND kind = 'adr' AND adr_number = ?",
+            )
+            .get(project.id, adrNumber),
+          409,
+          "adr_number_conflict",
+          `ADR number already exists: ${adrNumber}`,
+        );
       } else {
         slug = requireSlug(input.slug, "handoff slug");
         workId = workInProject(project.id, slug).id;
@@ -2243,6 +2317,7 @@ export function createStore(database, options = {}) {
     createIssue,
     createProject,
     createWork,
+    deleteDocument,
     deleteParticipant,
     deleteProject,
     deleteWork,

@@ -294,13 +294,24 @@ ao create-work implementation --title "Implementation" \
 ao create-work later --title "Declare its slot later"
 ao set-work-implementer later --implementer later-implementer
 ao create-document context --title "Shared terms" --file CONTEXT.md
+ao create-document adr --title "Explicitly numbered decision" \
+  --file docs/adr/0011-explicitly-numbered-decision.md \
+  --adr-number 11 --slug 0011-explicitly-numbered-decision
 ao create-document handoff --slug implementation --title "Implementation handoff" \
   --file docs/handoff/implementation.md
+ao delete-document example adr/0009-wrong-number \
+  --confirm adr/0009-wrong-number
 ```
 
 `set-work-implementer` declares or replaces the default implementer slot on an
 existing work. The next `ao rooms` listing and numbered skill join use that
 identifier.
+
+An ADR number can be declared explicitly when registering an existing Git
+document. Its optional explicit slug must start with the same zero-padded
+number. Duplicate ADR numbers return 409. Document deletion requires an exact
+`confirm` value and reports the deleted document, revisions, and message
+expectations.
 
 Use the thread:
 

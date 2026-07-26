@@ -656,6 +656,7 @@ test("every command rejects options it does not apply", async () => {
     "inject",
     "delete-project",
     "delete-work",
+    "delete-document",
     "delete-participant",
     "pull",
     "push",
@@ -948,6 +949,17 @@ test("delete CLI commands stay on the repository server and report protected cle
   );
   store.createProject({ slug: "delete-cli", name: "Delete CLI" });
   store.createWork("delete-cli", { slug: "old-work", title: "Old work" });
+  store.createDocument("delete-cli", {
+    kind: "context",
+    title: "Delete CLI context",
+    body: "revision one",
+    author: "designer",
+  });
+  store.updateDocument("delete-cli", "context", {
+    body: "revision two",
+    base_revision: 1,
+    author: "designer",
+  });
   store.poll(
     "delete-cli",
     "old-work",
@@ -988,6 +1000,39 @@ test("delete CLI commands stay on the repository server and report protected cle
   );
   assert.equal(protectedParticipant.code, 2);
   assert.match(protectedParticipant.stderr, /cannot be deleted after posting/i);
+
+  const wrongDocumentConfirmation = await runCli(
+    [
+      "delete-document",
+      "delete-cli",
+      "context",
+      "--confirm",
+      "another-document",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(wrongDocumentConfirmation.code, 1);
+  assert.equal(store.getDocument("delete-cli", "context").revision, 2);
+
+  const document = await runCli(
+    [
+      "delete-document",
+      "delete-cli",
+      "context",
+      "--confirm",
+      "context",
+    ],
+    repository,
+    environment,
+  );
+  assert.equal(document.code, 0, document.stderr);
+  assert.equal(JSON.parse(document.stdout).deleted.documents, 1);
+  assert.equal(JSON.parse(document.stdout).deleted.revisions, 2);
+  assert.throws(
+    () => store.getDocument("delete-cli", "context"),
+    /Document not found/,
+  );
 
   const wrongConfirmation = await runCli(
     [
@@ -1064,6 +1109,93 @@ test("delete CLI commands stay on the repository server and report protected cle
     store.listProjects().some(({ slug }) => slug === "delete-cli"),
     false,
   );
+});
+
+test("create-document preserves an explicit ADR number and rejects collisions", async () => {
+  store.createProject({ slug: "adr-cli", name: "ADR CLI" });
+  const repository = makeRepository("adr-cli-repository");
+  mkdirSync(join(repository, ".ao"), { recursive: true });
+  writeFileSync(
+    join(repository, ".ao/config.json"),
+    `${JSON.stringify(
+      {
+        server_url: serverUrl,
+        project: "adr-cli",
+        identifier: "adr-author",
+        role: "designer",
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  const file = join(repository, "0011-explicit-decision.md");
+  writeFileSync(file, "# ADR 0011: Explicit decision\n", "utf8");
+
+  const explicit = await runCli(
+    [
+      "create-document",
+      "adr",
+      "--title",
+      "Explicit decision",
+      "--file",
+      file,
+      "--adr-number",
+      "11",
+      "--slug",
+      "0011-explicit-decision",
+    ],
+    repository,
+  );
+  assert.equal(explicit.code, 0, explicit.stderr);
+  assert.equal(JSON.parse(explicit.stdout).adr_number, 11);
+  assert.equal(JSON.parse(explicit.stdout).doc, "adr/0011-explicit-decision");
+
+  const collision = await runCli(
+    [
+      "create-document",
+      "adr",
+      "--title",
+      "Conflicting number",
+      "--file",
+      file,
+      "--adr-number",
+      "11",
+    ],
+    repository,
+  );
+  assert.equal(collision.code, 2);
+  assert.match(collision.stderr, /ADR number already exists: 11/);
+
+  const automatic = await runCli(
+    [
+      "create-document",
+      "adr",
+      "--title",
+      "Automatic next number",
+      "--file",
+      file,
+    ],
+    repository,
+  );
+  assert.equal(automatic.code, 0, automatic.stderr);
+  assert.equal(JSON.parse(automatic.stdout).adr_number, 12);
+
+  const wrongKind = await runCli(
+    [
+      "create-document",
+      "context",
+      "--title",
+      "Wrong option",
+      "--file",
+      file,
+      "--adr-number",
+      "13",
+    ],
+    repository,
+  );
+  assert.equal(wrongKind.code, 1);
+  assert.match(wrongKind.stderr, /applies only to create-document adr/);
 });
 
 test("cold room join uses the declared slot, pulls context, and exposes the full thread", async () => {

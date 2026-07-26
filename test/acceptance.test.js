@@ -669,6 +669,97 @@ test("project deletion rolls every child deletion back after a later failure", (
   );
 });
 
+test("document deletion requires confirmation, removes revisions, and releases an ADR number", async () => {
+  const wrong = store.createDocument("sample", {
+    kind: "adr",
+    slug: "0009-adr-0011",
+    adr_number: 9,
+    title: "ADR 0011",
+    body: "revision one",
+    author: "designer",
+  });
+  assert.equal(wrong.adr_number, 9);
+  store.updateDocument("sample", wrong.doc, {
+    body: "revision two",
+    base_revision: 1,
+    author: "designer",
+  });
+  post("work-one", {
+    from: "reviewer",
+    role: "implementer",
+    expects: [{ doc: wrong.doc, revision: 1 }],
+  });
+
+  await withServer(async (base) => {
+    const missing = await request(
+      base,
+      "DELETE",
+      `/api/v1/projects/sample/documents/${wrong.doc}`,
+    );
+    assert.equal(missing.status, 400);
+    assert.equal(missing.body.expected_confirm, wrong.doc);
+
+    const wrongConfirmation = await request(
+      base,
+      "DELETE",
+      `/api/v1/projects/sample/documents/${wrong.doc}?confirm=adr%2Fanother`,
+    );
+    assert.equal(wrongConfirmation.status, 400);
+    assert.equal(store.getDocument("sample", wrong.doc).revision, 2);
+
+    const deleted = await request(
+      base,
+      "DELETE",
+      `/api/v1/projects/sample/documents/${wrong.doc}?confirm=${encodeURIComponent(wrong.doc)}`,
+    );
+    assert.equal(deleted.status, 200);
+    assert.deepEqual(deleted.body, {
+      target: { project: "sample", document: wrong.doc },
+      deleted: {
+        projects: 0,
+        works: 0,
+        messages: 0,
+        participants: 0,
+        documents: 1,
+        revisions: 2,
+        message_recipients: 0,
+        message_refs: 0,
+        message_expectations: 1,
+        ball_declarations: 0,
+      },
+    });
+  });
+
+  assert.throws(
+    () => store.getDocument("sample", wrong.doc),
+    /Document not found/,
+  );
+  assert.equal(store.listMessages("sample", "work-one").length, 1);
+  assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+
+  const corrected = store.createDocument("sample", {
+    kind: "adr",
+    slug: "0009-correct-decision",
+    adr_number: 9,
+    title: "Correct decision",
+    body: "correct",
+    author: "designer",
+  });
+  assert.equal(corrected.adr_number, 9);
+  assert.equal(corrected.doc, "adr/0009-correct-decision");
+  assert.throws(
+    () =>
+      store.createDocument("sample", {
+        kind: "adr",
+        adr_number: 9,
+        title: "Duplicate number",
+        body: "duplicate",
+        author: "designer",
+      }),
+    (error) => error.status === 409 && error.code === "adr_number_conflict",
+  );
+});
+
 test("work deletion removes its thread and documents but preserves the project", async () => {
   store.createWork("sample", { slug: "delete-work", title: "Delete work" });
   store.createDocument("sample", {
@@ -1098,6 +1189,82 @@ test("active post and poll update attention heartbeat", () => {
     0,
   );
   assert.equal(active.heartbeat_at, "2026-07-26T00:00:02.000Z");
+});
+
+test("project activity prevents abandonment without moving a work-local ball", () => {
+  store.createWork("sample", {
+    slug: "other-work",
+    title: "Other work",
+  });
+  post("work-one", {
+    type: "question",
+    body: "Keep the ball in this work",
+    to: ["cross-work-designer"],
+  });
+  store.poll(
+    "sample",
+    "work-one",
+    "cross-work-designer",
+    "designer",
+    0,
+  );
+  assert.equal(
+    store.ballFor(1, "cross-work-designer").has_ball,
+    true,
+  );
+
+  currentTime = new Date(currentTime.getTime() + 2 * 60_000);
+  store.poll(
+    "sample",
+    "other-work",
+    "cross-work-designer",
+    "designer",
+    0,
+  );
+  currentTime = new Date(currentTime.getTime() + 2 * 60_000);
+
+  const observed = store.poll(
+    "sample",
+    "work-one",
+    "observer",
+    "implementer",
+    0,
+  );
+  assert.equal(
+    observed.abandoned.some(
+      ({ identifier }) => identifier === "cross-work-designer",
+    ),
+    false,
+  );
+  const workOneDesigner = store
+    .getWork("sample", "work-one")
+    .participants.find(
+      ({ identifier }) => identifier === "cross-work-designer",
+    );
+  assert.equal(workOneDesigner.present, false);
+  assert.equal(workOneDesigner.abandoned, false);
+  assert.equal(workOneDesigner.ball.has_ball, true);
+  const otherWorkDesigner = store
+    .getWork("sample", "other-work")
+    .participants.find(
+      ({ identifier }) => identifier === "cross-work-designer",
+    );
+  assert.equal(otherWorkDesigner.ball.has_ball, false);
+
+  currentTime = new Date(currentTime.getTime() + 3 * 60_000 + 1);
+  const stale = store.poll(
+    "sample",
+    "work-one",
+    "observer",
+    "implementer",
+    0,
+  );
+  assert.equal(
+    stale.abandoned.some(
+      ({ identifier }) => identifier === "cross-work-designer",
+    ),
+    true,
+  );
 });
 
 test("poll infers an existing role, requires one for registration, and reports conflicts", async () => {

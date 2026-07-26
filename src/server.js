@@ -336,6 +336,18 @@ async function routeApi(request, response, url, store) {
       json(response, 200, store.updateDocument(project, document, await readJson(request)));
       return true;
     }
+    if (method === "DELETE") {
+      json(
+        response,
+        200,
+        store.deleteDocument(
+          project,
+          document,
+          url.searchParams.get("confirm"),
+        ),
+      );
+      return true;
+    }
   }
 
   match = path.match(

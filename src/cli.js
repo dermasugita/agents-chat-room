@@ -45,9 +45,10 @@ Usage:
   ao resolve [--identifier ID] [--role ROLE]
   ao create-work <SLUG> --title TITLE [--implementer ID]
   ao set-work-implementer <WORK> --implementer ID [--repo PATH]
-  ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
+  ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG] [--adr-number N]
   ao delete-project <PROJECT> --confirm PROJECT [--delete-nonempty] [--repo PATH]
   ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]
+  ao delete-document <PROJECT> <DOC> --confirm DOC [--repo PATH]
   ao delete-participant <PROJECT> <WORK> <IDENTIFIER> [--repo PATH]
   ao issue-create <PROJECT> --title TITLE --body TEXT [--repo PATH]
   ao issues [PROJECT] [--state open|closed|all] [--repo PATH]
@@ -85,6 +86,7 @@ const COMMAND_OPTIONS = new Map([
   ],
   ["delete-project", ["confirm", "delete-nonempty", "repo"]],
   ["delete-work", ["confirm", "delete-nonempty", "repo"]],
+  ["delete-document", ["confirm", "repo"]],
   ["delete-participant", ["repo"]],
   ["pull", [...CONTEXT_OPTIONS, "force"]],
   ["push", [...CONTEXT_OPTIONS, "note"]],
@@ -109,7 +111,10 @@ const COMMAND_OPTIONS = new Map([
   ["resolve", CONTEXT_OPTIONS],
   ["create-work", [...CONTEXT_OPTIONS, "title", "implementer"]],
   ["set-work-implementer", [...CONTEXT_OPTIONS, "implementer"]],
-  ["create-document", [...CONTEXT_OPTIONS, "title", "file", "slug"]],
+  [
+    "create-document",
+    [...CONTEXT_OPTIONS, "title", "file", "slug", "adr-number"],
+  ],
   ["import", [...CONTEXT_OPTIONS, "yes", "project", "name"]],
   ["issue-create", ["title", "body", "repo"]],
   ["issues", ["state", "repo"]],
@@ -670,6 +675,28 @@ async function deleteWorkCommand(parsed) {
     resolvedServer,
     "DELETE",
     `/projects/${encodeURIComponent(project)}/works/${encodeURIComponent(work)}?${query}`,
+  );
+}
+
+async function deleteDocumentCommand(parsed) {
+  const project = requiredArgument(
+    parsed,
+    1,
+    "ao delete-document <PROJECT> <DOC> --confirm DOC [--repo PATH]",
+  );
+  const document = requiredArgument(
+    parsed,
+    2,
+    "ao delete-document <PROJECT> <DOC> --confirm DOC [--repo PATH]",
+  );
+  const query = new URLSearchParams({
+    confirm: requireOption(parsed, "confirm"),
+  });
+  const resolvedServer = resolveServerUrl(parsed);
+  return api(
+    resolvedServer,
+    "DELETE",
+    `/projects/${apiPath(project)}/documents/${apiPath(document)}?${query}`,
   );
 }
 
@@ -1966,6 +1993,10 @@ export async function main(argv) {
     print(await deleteWorkCommand(parsed));
     return;
   }
+  if (command === "delete-document") {
+    print(await deleteDocumentCommand(parsed));
+    return;
+  }
   if (command === "delete-participant") {
     print(await deleteParticipantCommand(parsed));
     return;
@@ -2116,6 +2147,17 @@ export async function main(argv) {
       throw new CliError("create-document requires a kind");
     }
     const file = requireOption(parsed, "file");
+    const adrNumberOption = option(parsed, "adr-number");
+    if (kind !== "adr" && adrNumberOption !== undefined) {
+      throw new CliError("--adr-number applies only to create-document adr");
+    }
+    let adrNumber;
+    if (adrNumberOption !== undefined) {
+      adrNumber = Number(adrNumberOption);
+      if (!Number.isInteger(adrNumber) || adrNumber < 1) {
+        throw new CliError("--adr-number must be a positive integer");
+      }
+    }
     print(
       await api(
         context.config,
@@ -2127,6 +2169,9 @@ export async function main(argv) {
           body: readFileSync(file, "utf8"),
           author: context.config.identifier,
           ...(option(parsed, "slug") ? { slug: option(parsed, "slug") } : {}),
+          ...(adrNumber === undefined
+            ? {}
+            : { adr_number: adrNumber }),
         },
       ),
     );
