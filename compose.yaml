@@ -1,0 +1,23 @@
+services:
+  server:
+    build:
+      context: .
+      platforms:
+        - linux/amd64
+    image: agents-chat-room:0.1.0
+    restart: unless-stopped
+    environment:
+      AO_BIND: 0.0.0.0
+      AO_DATABASE_PATH: /data/ao.sqlite
+      AO_PORT: "7331"
+    ports:
+      - name: web
+        target: 7331
+        published: "7331"
+        host_ip: 127.0.0.1
+        protocol: tcp
+    volumes:
+      - agents-chat-room-data:/data
+
+volumes:
+  agents-chat-room-data:
