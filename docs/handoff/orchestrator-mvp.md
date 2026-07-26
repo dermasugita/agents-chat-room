@@ -174,7 +174,7 @@ CONTEXT / ADR / HANDOFF と非同期チャットを介して設計と実装を�
 | `GET` | `/projects/:project/works/:work/messages?since=<seq>` | `since` より後のメッセージ |
 | `POST` | `/projects/:project/works/:work/messages` | 投稿。下記参照 |
 | `POST` | `/projects/:project/works/:work/messages/:seq/close` | question を明示クローズ。**投稿者本人のみ** |
-| `GET` | `/projects/:project/works/:work/poll?since=<seq>&as=<identifier>` | **心拍を兼ねる**。§3.1 |
+| `GET` | `/projects/:project/works/:work/poll?since=<seq>&as=<identifier>[&role=<role>]` | **心拍を兼ねる**。§3.1 |
 | `GET` | `/inbox?as=<identifier>` | 全プロジェクト横断の、自分宛の未回答 question |
 
 > **訂正（2026-07-26、実装者の指摘による）**: これらのパスは当初 `/works/:work/...` と
@@ -226,6 +226,19 @@ CONTEXT / ADR / HANDOFF と非同期チャットを介して設計と実装を�
 エージェントが10秒ごとに叩く唯一のエンドポイント。**このリクエストが心拍を兼ねる**
 （[ADR 0006](../adr/0006-ball-tracking-and-heartbeat.md)）。呼び出しごとに `as` で指定された
 参加者の `last_heartbeat_at` を更新する。
+
+**`role` の扱い**（当初 §3 に記載が無く、実装との食い違いを実測で発見したため追記）:
+
+- `as` の参加者が**まだ存在しない**場合、`role` は**必須**（400）。参加者はここで自動登録される
+- `as` の参加者が**既に存在する**場合、`role` は**省略可**。省略時は登録済みのロールを使う
+- `role` を渡し、それが登録済みのロールと**異なる**場合は 409。
+  エラー本文には**要求されたロールと登録済みのロールの両方**を含めること
+  （「designer is already registered as designer」のように、
+  何を要求したのか分からない文言にしない）
+
+省略可にする理由は、既存参加者にとって `role` は冗長であり、
+毎回のポーリングで送らせると「送り忘れ・取り違え」が起きるため。
+CLI は `.ao/config.json` から常に送ってよいが、API 側で必須にはしない。
 
 応答:
 
