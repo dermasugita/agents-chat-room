@@ -2659,6 +2659,26 @@ test("service skill templates contain none of the retired file protocol", () => 
     /join-room\.mjs <NUMBER> --repo worktree\/<WORK>\s*\ncd worktree\/<WORK>/,
   );
   assert.match(sessionSkill, /ls \.claude\/skills \.agents\/skills/);
+  // step 3 が cd で終わると step 4 の「メインチェックアウトに留まれ」と矛盾する。
+  // 一度その矛盾を書いたので、cd は step 4 の1箇所だけであることを固定する。
+  {
+    const step3 = sessionSkill.slice(
+      sessionSkill.indexOf("### 3. Create your own git worktree"),
+      sessionSkill.indexOf("### 4. Install the skills"),
+    );
+    assert.doesNotMatch(step3, /cd worktree/);
+    assert.match(step3, /Do not `cd` yet/);
+    assert.equal((sessionSkill.match(/^cd worktree\/<WORK>$/gm) ?? []).length, 1);
+  }
+  // 同一性は部屋番号から導く。ao inject を代わりに使わせない。
+  assert.match(
+    sessionSkill,
+    /Use this helper, not `ao inject`/,
+  );
+  assert.match(
+    sessionSkill,
+    /identity comes from the room's declared implementer slot/,
+  );
   assert.match(
     sessionSkill,
     /### 6\. Register a periodic self-check — mandatory/,

@@ -44,8 +44,9 @@ From the main checkout, with `<WORK>` = the work slug of the room you chose:
 git fetch origin
 git worktree list                                             # confirm worktree/<WORK> is absent
 git worktree add worktree/<WORK> -b work/<WORK> origin/main    # branch is free
-cd worktree/<WORK>
 ```
+
+**Do not `cd` yet.** Step 4 runs from here.
 
 **If `work/<WORK>` is already checked out elsewhere**, git refuses with
 `already checked out`. Do not switch the other checkout — someone is using it.
@@ -53,7 +54,6 @@ Create your own branch instead, based on the tip of the contended branch:
 
 ```sh
 git worktree add worktree/<WORK> -b work/<WORK>-impl origin/work/<WORK>
-cd worktree/<WORK>
 ```
 
 Say which branch you created in the step 7 report. The designer merges it later.
@@ -62,15 +62,15 @@ Say which branch you created in the step 7 report. The designer merges it later.
 HEAD.** Commits on a detached HEAD are lost when HEAD moves. If the handoff
 names a different base branch, use that instead of `origin/main`.
 
-Run every later command from inside this worktree. Never point `cli.args` at a
-path inside the repository; it changes whenever someone checks out a different
-commit.
+From step 4 onward, run every command from inside this worktree.
+Never point `cli.args` at a path inside the repository; it changes whenever
+someone checks out a different commit.
 
 **A worktree without skills is a worktree that does not follow them.** A fresh
-worktree has no `.claude/skills/` or `.agents/skills/` yet, so **do not `cd` into
-it before step 4.** Two worktrees in this project were found running with no
-skills installed at all: the worktree step had been done and the skill step had
-not.
+worktree has no `.claude/skills/` or `.agents/skills/` yet, which is why step 4
+runs from the main checkout and `cd`s afterwards. Two worktrees in this project
+were found running with no skills installed at all: the worktree step had been
+done and the skill step had not.
 
 ### 4. Install the skills into the worktree, then enter it
 
@@ -84,8 +84,24 @@ cd worktree/<WORK>
 
 This writes `.ao/config.json` in the worktree, installs the skills into both
 `.claude/skills/` and `.agents/skills/` there, pulls every document, and prints
-the whole thread. If the room shows `slot=undeclared`, add `--identifier <ID>`;
-ask the owner for that one value.
+the whole thread.
+
+**Your identity comes from the room's declared implementer slot**, so the room
+number is normally the only input. If the listing showed `slot=undeclared` there
+is nothing to take it from, and the helper needs it spelled out:
+
+```sh
+node .agents/skills/session-chat/scripts/join-room.mjs <NUMBER> --repo worktree/<WORK> --identifier <ID>
+```
+
+Ask the owner for that one value; do not invent one. An identifier you made up
+splits your history from the thread the designer is reading.
+
+**Use this helper, not `ao inject`.** `ao inject` writes the same config but takes
+`--project`, `--work`, and `--identifier` separately, and a fresh worktree has no
+existing config to fall back on — so every value must be correct by hand, and a
+wrong `--project` points you at a different room. The helper derives all of it
+from the room number.
 
 Confirm before continuing:
 
