@@ -62,7 +62,26 @@ class CliError extends Error {
 class ApiError extends CliError {
   constructor(status, body) {
     const detail = body?.message ?? body?.error ?? `HTTP ${status}`;
-    super(`Server returned ${status}: ${detail}`, status === 409 ? 2 : 1);
+    const issues = Array.isArray(body?.errors)
+      ? body.errors
+          .map((issue) => {
+            const location = [
+              issue.work ? `work=${issue.work}` : null,
+              issue.line ? `line=${issue.line}` : null,
+              issue.id ? `id=${issue.id}` : null,
+              issue.doc ? `doc=${issue.doc}` : null,
+              issue.field ? `field=${issue.field}` : null,
+            ]
+              .filter(Boolean)
+              .join(" ");
+            return `- ${location} value=${JSON.stringify(issue.value)} ${issue.message}`;
+          })
+          .join("\n")
+      : "";
+    super(
+      `Server returned ${status}: ${detail}${issues ? `\n${issues}` : ""}`,
+      status === 409 ? 2 : 1,
+    );
     this.status = status;
     this.body = body;
   }
@@ -972,21 +991,48 @@ function readSession(path) {
   if (lines.at(-1) === "") {
     lines.pop();
   }
-  return lines.map((line, index) => {
+  const messages = [];
+  const errors = [];
+  lines.forEach((line, index) => {
     try {
-      return JSON.parse(line);
+      const message = JSON.parse(line);
+      messages.push(message);
+      if (message && typeof message === "object" && !Array.isArray(message)) {
+        for (const field of ["ts", "closed_at"]) {
+          if (
+            message[field] &&
+            Number.isNaN(new Date(message[field]).getTime())
+          ) {
+            errors.push({
+              path,
+              line: index + 1,
+              id: typeof message.id === "string" ? message.id : null,
+              field,
+              value: message[field],
+              message: `Invalid timestamp: ${message[field]}`,
+            });
+          }
+        }
+      }
     } catch (error) {
-      throw new CliError(
-        `${path}:${index + 1} is not valid JSON: ${error.message}`,
-      );
+      errors.push({
+        path,
+        line: index + 1,
+        id: null,
+        field: null,
+        value: null,
+        message: error.message,
+      });
     }
   });
+  return { errors, messages };
 }
 
 function buildImportBundle(source, context, parsed) {
   const documents = [];
   const works = new Map();
   const sessions = [];
+  const sessionValidationErrors = [];
   const contextPath = join(source, "CONTEXT.md");
   if (existsSync(contextPath)) {
     const body = readFileSync(contextPath, "utf8");
@@ -1033,8 +1079,10 @@ function buildImportBundle(source, context, parsed) {
       .filter((entry) => entry.endsWith(".jsonl"))
       .sort()) {
       const workSlug = name.slice(0, -6);
+      const parsedSession = readSession(join(sessionDirectory, name));
+      sessionValidationErrors.push(...parsedSession.errors);
       sessions.push({
-        messages: readSession(join(sessionDirectory, name)),
+        messages: parsedSession.messages,
         title: works.get(workSlug)?.title ?? workSlug,
         work_slug: workSlug,
       });
@@ -1042,6 +1090,17 @@ function buildImportBundle(source, context, parsed) {
         works.set(workSlug, { slug: workSlug, state: "open", title: workSlug });
       }
     }
+  }
+  if (sessionValidationErrors.length > 0) {
+    throw new CliError(
+      `Import validation failed for ${sessionValidationErrors.length} source field(s); no request was sent:\n${sessionValidationErrors
+        .map((error) =>
+          error.field
+            ? `- ${error.path}:${error.line} id=${error.id ?? "unknown"} field=${error.field} value=${JSON.stringify(error.value)} ${error.message}`
+            : `- ${error.path}:${error.line} is not valid JSON: ${error.message}`,
+        )
+        .join("\n")}`,
+    );
   }
   const project = String(option(parsed, "project", context.config.project));
   return {

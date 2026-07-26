@@ -265,6 +265,12 @@ file order. Every source ID is retained as an `imported-id:` reference.
 Ambiguous reply targets are set to null and retained as
 `unresolved-reply-to:` references.
 
+Before showing the plan or sending a request, the CLI scans every JSONL line
+and lists every malformed JSON or invalid `ts`/`closed_at` with its file, line,
+source ID, field, and value. The server repeats timestamp preflight for direct
+API clients before opening the import transaction. Any validation failure
+writes no project, work, document, or message rows.
+
 ## Local development
 
 Direct startup is safe by default and listens only on loopback:

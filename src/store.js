@@ -1106,6 +1106,122 @@ export function createStore(database, options = {}) {
     assert(Array.isArray(works), 400, "invalid_request", "works must be an array");
     assert(Array.isArray(sessions), 400, "invalid_request", "sessions must be an array");
 
+    const validationErrors = [];
+    for (let sessionIndex = 0; sessionIndex < sessions.length; sessionIndex += 1) {
+      const session = sessions[sessionIndex];
+      if (!session || typeof session !== "object" || Array.isArray(session)) {
+        validationErrors.push({
+          source: "session",
+          session: sessionIndex + 1,
+          work: null,
+          line: null,
+          id: null,
+          field: "session",
+          value: session ?? null,
+          message: "Session must be an object",
+        });
+        continue;
+      }
+      const work =
+        typeof session.work_slug === "string" ? session.work_slug : null;
+      if (!work || !SLUG_PATTERN.test(work)) {
+        validationErrors.push({
+          source: "session",
+          session: sessionIndex + 1,
+          work,
+          line: null,
+          id: null,
+          field: "work_slug",
+          value: session.work_slug ?? null,
+          message:
+            "session work slug must use lowercase letters, digits, and single hyphens",
+        });
+      }
+      if (!Array.isArray(session.messages)) {
+        validationErrors.push({
+          source: "session",
+          session: sessionIndex + 1,
+          work,
+          line: null,
+          id: null,
+          field: "messages",
+          value: session.messages ?? null,
+          message: "Session messages must be an array",
+        });
+        continue;
+      }
+      for (let index = 0; index < session.messages.length; index += 1) {
+        const source = session.messages[index];
+        const location = {
+          source: "session",
+          session: sessionIndex + 1,
+          work,
+          line: index + 1,
+          id:
+            source &&
+            typeof source === "object" &&
+            typeof source.id === "string"
+              ? source.id
+              : null,
+        };
+        if (!source || typeof source !== "object" || Array.isArray(source)) {
+          validationErrors.push({
+            ...location,
+            field: "message",
+            value: source ?? null,
+            message: "Session message must be an object",
+          });
+          continue;
+        }
+        for (const field of ["ts", "closed_at"]) {
+          if (!source[field]) {
+            continue;
+          }
+          try {
+            normalizeTime(source[field]);
+          } catch (error) {
+            validationErrors.push({
+              ...location,
+              field,
+              value: source[field],
+              message: error.message,
+            });
+          }
+        }
+      }
+    }
+    for (let index = 0; index < documents.length; index += 1) {
+      const document = documents[index];
+      if (!document?.created_at) {
+        continue;
+      }
+      try {
+        normalizeTime(document.created_at);
+      } catch (error) {
+        validationErrors.push({
+          source: "document",
+          document: index + 1,
+          doc:
+            document.kind === "context"
+              ? "context"
+              : `${document.kind ?? "unknown"}/${document.slug ?? "unknown"}`,
+          line: null,
+          id: null,
+          field: "created_at",
+          value: document.created_at,
+          message: error.message,
+        });
+      }
+    }
+    if (validationErrors.length > 0) {
+      throw new AppError(
+        400,
+        "import_validation_failed",
+        `Import validation failed for ${validationErrors.length} field(s); no data was written`,
+        { errors: validationErrors },
+      );
+    }
+
     return inTransaction(database, () => {
       const importedAt = now();
       let project = database

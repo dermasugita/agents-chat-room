@@ -1240,6 +1240,107 @@ test("import shows a plan, requires confirmation, and sends legacy files", async
   assert.ok(messages.every(({ refs }) => refs.includes("imported-id:msg-0001")));
 });
 
+test("import lists every invalid source line and preserves an empty destination", async () => {
+  const controller = makeRepository("invalid-import-controller");
+  await injectRepository(controller, "invalid-importer");
+  const source = makeRepository("invalid-import-source");
+  mkdirSync(join(source, "docs", "session"), { recursive: true });
+  writeFileSync(
+    join(source, "docs", "session", "first-work.jsonl"),
+    [
+      JSON.stringify({
+        id: "msg-0001",
+        ts: "bad-time-one",
+        from: "designer",
+        type: "message",
+        body: "first",
+      }),
+      JSON.stringify({
+        id: "msg-0002",
+        ts: "2026-07-26T09:00:00+09:00",
+        closed_at: "bad-time-two",
+        from: "designer",
+        type: "message",
+        body: "second",
+      }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+  writeFileSync(
+    join(source, "docs", "session", "second-work.jsonl"),
+    `${JSON.stringify({
+      id: "msg-0003",
+      ts: "bad-time-three",
+      from: "implementer",
+      type: "status",
+      body: "third",
+    })}\n`,
+    "utf8",
+  );
+
+  const invalid = await runCli(
+    [
+      "import",
+      source,
+      "--project",
+      "invalid-cli-import",
+      "--name",
+      "Invalid CLI import",
+      "--yes",
+    ],
+    controller,
+  );
+  assert.equal(invalid.code, 1);
+  assert.match(invalid.stderr, /Import validation failed for 3 source field/);
+  for (const expected of [
+    "first-work.jsonl:1 id=msg-0001 field=ts",
+    "first-work.jsonl:2 id=msg-0002 field=closed_at",
+    "second-work.jsonl:1 id=msg-0003 field=ts",
+    'value="bad-time-one"',
+    'value="bad-time-two"',
+    'value="bad-time-three"',
+  ]) {
+    assert.match(invalid.stderr, new RegExp(expected));
+  }
+  assert.doesNotMatch(invalid.stderr, /Import plan/);
+  assert.equal(
+    store.listProjects().some(({ slug }) => slug === "invalid-cli-import"),
+    false,
+  );
+
+  const malformedSource = makeRepository("malformed-json-import-source");
+  mkdirSync(join(malformedSource, "docs", "session"), { recursive: true });
+  writeFileSync(
+    join(malformedSource, "docs", "session", "alpha.jsonl"),
+    '{"id":"valid"}\n{"id": invalid-alpha}\n',
+    "utf8",
+  );
+  writeFileSync(
+    join(malformedSource, "docs", "session", "beta.jsonl"),
+    '{"id": invalid-beta}\n',
+    "utf8",
+  );
+  const malformed = await runCli(
+    [
+      "import",
+      malformedSource,
+      "--project",
+      "malformed-cli-import",
+      "--yes",
+    ],
+    controller,
+  );
+  assert.equal(malformed.code, 1);
+  assert.match(malformed.stderr, /2 source field/);
+  assert.match(malformed.stderr, /alpha\.jsonl:2 is not valid JSON/);
+  assert.match(malformed.stderr, /beta\.jsonl:1 is not valid JSON/);
+  assert.doesNotMatch(malformed.stderr, /Import plan/);
+  assert.equal(
+    store.listProjects().some(({ slug }) => slug === "malformed-cli-import"),
+    false,
+  );
+});
+
 test("service skill templates contain none of the retired file protocol", () => {
   const templatePaths = [
     "templates/skills/session-chat/SKILL.md",

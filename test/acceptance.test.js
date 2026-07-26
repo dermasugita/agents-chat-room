@@ -681,3 +681,131 @@ test("import preserves every line, original duplicate IDs, and unresolved replie
   const adr = store.listDocuments("legacy")[0];
   assert.equal(adr.slug, "0007-original-number");
 });
+
+test("import preflight reports every invalid timestamp and writes nothing", async () => {
+  const before = {
+    projects: database.prepare("SELECT COUNT(*) AS count FROM project").get().count,
+    works: database.prepare("SELECT COUNT(*) AS count FROM work").get().count,
+    documents: database.prepare("SELECT COUNT(*) AS count FROM document").get()
+      .count,
+    messages: database.prepare("SELECT COUNT(*) AS count FROM message").get().count,
+  };
+  const bundle = {
+    project: { slug: "invalid-import", name: "Invalid import" },
+    documents: [],
+    works: [],
+    sessions: [
+      {
+        work_slug: "first-work",
+        messages: [
+          {
+            id: "msg-0001",
+            ts: "not-a-time-one",
+            from: "designer",
+            type: "message",
+            body: "first",
+          },
+          {
+            id: "msg-0002",
+            ts: "2026-07-26T09:00:00+09:00",
+            closed_at: "not-a-time-two",
+            from: "designer",
+            type: "message",
+            body: "second",
+          },
+        ],
+      },
+      {
+        work_slug: "second-work",
+        messages: [
+          {
+            id: "msg-0003",
+            ts: "not-a-time-three",
+            from: "implementer",
+            type: "status",
+            body: "third",
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.throws(
+    () => store.importBundle(bundle),
+    (error) => {
+      assert.equal(error.status, 400);
+      assert.equal(error.code, "import_validation_failed");
+      assert.match(error.message, /3 field/);
+      assert.deepEqual(
+        error.details.errors.map(({ work, line, id, field, value }) => ({
+          work,
+          line,
+          id,
+          field,
+          value,
+        })),
+        [
+          {
+            work: "first-work",
+            line: 1,
+            id: "msg-0001",
+            field: "ts",
+            value: "not-a-time-one",
+          },
+          {
+            work: "first-work",
+            line: 2,
+            id: "msg-0002",
+            field: "closed_at",
+            value: "not-a-time-two",
+          },
+          {
+            work: "second-work",
+            line: 1,
+            id: "msg-0003",
+            field: "ts",
+            value: "not-a-time-three",
+          },
+        ],
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(
+    {
+      projects: database.prepare("SELECT COUNT(*) AS count FROM project").get()
+        .count,
+      works: database.prepare("SELECT COUNT(*) AS count FROM work").get().count,
+      documents: database.prepare("SELECT COUNT(*) AS count FROM document").get()
+        .count,
+      messages: database.prepare("SELECT COUNT(*) AS count FROM message").get()
+        .count,
+    },
+    before,
+  );
+
+  await withServer(async (base) => {
+    const response = await request(base, "POST", "/api/v1/import", bundle);
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error, "import_validation_failed");
+    assert.equal(response.body.errors.length, 3);
+    assert.deepEqual(
+      response.body.errors.map(({ work, line, field }) => ({
+        work,
+        line,
+        field,
+      })),
+      [
+        { work: "first-work", line: 1, field: "ts" },
+        { work: "first-work", line: 2, field: "closed_at" },
+        { work: "second-work", line: 1, field: "ts" },
+      ],
+    );
+  });
+  assert.equal(
+    database
+      .prepare("SELECT 1 FROM project WHERE slug = 'invalid-import'")
+      .get(),
+    undefined,
+  );
+});
