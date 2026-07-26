@@ -65,10 +65,12 @@ test("markdown rendering escapes HTML and renders basic structure", () => {
 
 test("web shows projects and the cross-project owner inbox", async () => {
   const html = await (await fetch(`${base}/`)).text();
+  assert.match(html, /<html lang="ja">/);
   assert.match(html, /Web project/);
-  assert.match(html, /Owner inbox/);
+  assert.match(html, /オーナー受信箱/);
   assert.match(html, /Owner, choose one/);
-  assert.match(html, /Answer as owner/);
+  assert.match(html, /オーナーとして回答/);
+  assert.doesNotMatch(html, /Owner inbox|Answer as owner/);
 });
 
 test("web shows current documents, revision history, and arbitrary revisions", async () => {
@@ -78,8 +80,10 @@ test("web shows current documents, revision history, and arbitrary revisions", a
     )
   ).text();
   assert.match(current, /Revision two/);
-  assert.match(current, /revision 2/);
-  assert.match(current, /revision 1/);
+  assert.match(current, /リビジョン 2/);
+  assert.match(current, /リビジョン 1/);
+  assert.match(current, /JST/);
+  assert.doesNotMatch(current, /Revision history/);
 
   const old = await (
     await fetch(
@@ -133,10 +137,19 @@ test("work page exposes conversation, reply links, and participant state", async
   const html = await (
     await fetch(`${base}/projects/web-project/works/web-work`)
   ).text();
-  assert.match(html, /Conversation/);
-  assert.match(html, /Participants/);
+  assert.match(html, /会話/);
+  assert.match(html, /参加者/);
   assert.match(html, /designer/);
   assert.match(html, /owner/);
-  assert.match(html, /reply_to:/);
-  assert.match(html, /Post as owner/);
+  assert.match(html, /question/);
+  assert.match(html, /返信先:/);
+  assert.match(html, /オーナーとして投稿/);
+  assert.match(html, /進行中/);
+  assert.match(html, /ボールなし/);
+  assert.match(html, /心拍なし/);
+  assert.match(html, /JST/);
+  assert.doesNotMatch(
+    html,
+    /Conversation|Participants|Post as owner|no heartbeat/,
+  );
 });

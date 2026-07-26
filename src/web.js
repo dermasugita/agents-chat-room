@@ -2,6 +2,16 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "./errors.js";
 
 const MAX_FORM_BYTES = 256 * 1024;
+const JST_FORMATTER = new Intl.DateTimeFormat("ja-JP-u-ca-gregory-nu-latn", {
+  day: "2-digit",
+  hour: "2-digit",
+  hour12: false,
+  minute: "2-digit",
+  month: "2-digit",
+  second: "2-digit",
+  timeZone: "Asia/Tokyo",
+  year: "numeric",
+});
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -16,6 +26,33 @@ function inlineMarkdown(value) {
   return escapeHtml(value)
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+}
+
+function formatJst(value) {
+  if (!value) {
+    return "心拍なし";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  const parts = Object.fromEntries(
+    JST_FORMATTER.formatToParts(date).map(({ type, value: part }) => [
+      type,
+      part,
+    ]),
+  );
+  return `${parts.year}/${parts.month}/${parts.day} ${parts.hour}:${parts.minute}:${parts.second} JST`;
+}
+
+function workStateLabel(state) {
+  if (state === "open") {
+    return "進行中";
+  }
+  if (state === "resolved") {
+    return "resolve 済み";
+  }
+  return state;
 }
 
 export function renderMarkdown(markdown) {
@@ -84,7 +121,7 @@ export function renderMarkdown(markdown) {
 
 function layout(title, body) {
   return `<!doctype html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -120,7 +157,7 @@ function layout(title, body) {
   </style>
 </head>
 <body>
-<header><a href="/"><strong>agents-chat-room</strong></a> <span class="meta">owner endpoint</span></header>
+<header><a href="/"><strong>agents-chat-room</strong></a> <span class="meta">オーナー画面</span></header>
 <main>${body}</main>
 </body>
 </html>`;
@@ -155,7 +192,7 @@ async function readForm(request) {
 function projectCard(project) {
   return `<article class="card">
     <h2><a href="/projects/${encodeURIComponent(project.slug)}">${escapeHtml(project.name)}</a></h2>
-    <p class="meta">${escapeHtml(project.slug)} · ${project.document_count} documents · ${project.work_count} works</p>
+    <p class="meta">${escapeHtml(project.slug)} · 文書 ${project.document_count}件 · 作業 ${project.work_count}件</p>
   </article>`;
 }
 
@@ -170,8 +207,8 @@ function inboxCard(question) {
       <input type="hidden" name="type" value="answer">
       <input type="hidden" name="reply_to" value="${message.seq}">
       <input type="hidden" name="to" value="${escapeHtml(message.from)}">
-      <label>Answer<textarea name="body" required></textarea></label>
-      <button type="submit">Answer as owner</button>
+      <label>回答<textarea name="body" required></textarea></label>
+      <button type="submit">オーナーとして回答</button>
     </form>
   </article>`;
 }
@@ -180,12 +217,12 @@ function home(store) {
   const projects = store.listProjects();
   const questions = store.inbox("owner");
   return layout(
-    "Projects",
-    `<h1>Projects</h1>
-     <div class="grid">${projects.map(projectCard).join("") || '<p class="card">No projects yet.</p>'}</div>
-     <h1>Owner inbox</h1>
-     <p class="meta">Unanswered questions addressed to <code>owner</code> across every project.</p>
-     <div class="grid">${questions.map(inboxCard).join("") || '<p class="card">No unanswered questions.</p>'}</div>`,
+    "プロジェクト",
+    `<h1>プロジェクト</h1>
+     <div class="grid">${projects.map(projectCard).join("") || '<p class="card">プロジェクトはまだありません。</p>'}</div>
+     <h1>オーナー受信箱</h1>
+     <p class="meta">全プロジェクトの <code>owner</code> 宛未回答 <code>question</code>。</p>
+     <div class="grid">${questions.map(inboxCard).join("") || '<p class="card">未回答の question はありません。</p>'}</div>`,
   );
 }
 
@@ -198,21 +235,21 @@ function projectPage(store, slug) {
         <td>${escapeHtml(document.kind)}</td><td>${document.current_revision}</td>
       </tr>`,
     )
-    .join("");
+    .join("") || '<tr><td colspan="3">文書はまだありません。</td></tr>';
   const works = project.works
     .map(
       (work) => `<tr>
         <td><a href="/projects/${encodeURIComponent(slug)}/works/${encodeURIComponent(work.slug)}">${escapeHtml(work.title)}</a></td>
-        <td>${escapeHtml(work.slug)}</td><td><span class="badge">${escapeHtml(work.state)}</span></td>
+        <td>${escapeHtml(work.slug)}</td><td><span class="badge">${escapeHtml(workStateLabel(work.state))}</span></td>
       </tr>`,
     )
-    .join("");
+    .join("") || '<tr><td colspan="3">作業はまだありません。</td></tr>';
   return layout(
     project.name,
-    `<p><a href="/">← Projects</a></p>
+    `<p><a href="/">← プロジェクト一覧</a></p>
      <h1>${escapeHtml(project.name)}</h1><p class="meta">${escapeHtml(project.slug)}</p>
-     <section class="card"><h2>Documents</h2><table><thead><tr><th>Title</th><th>Kind</th><th>Revision</th></tr></thead><tbody>${documents}</tbody></table></section>
-     <section class="card"><h2>Works</h2><table><thead><tr><th>Title</th><th>Slug</th><th>State</th></tr></thead><tbody>${works}</tbody></table></section>`,
+     <section class="card"><h2>文書</h2><table><thead><tr><th>タイトル</th><th>文書種別</th><th>リビジョン</th></tr></thead><tbody>${documents}</tbody></table></section>
+     <section class="card"><h2>作業</h2><table><thead><tr><th>タイトル</th><th>作業識別子</th><th>状態</th></tr></thead><tbody>${works}</tbody></table></section>`,
   );
 }
 
@@ -221,16 +258,16 @@ function documentPage(store, projectSlug, identifier, revision) {
   const revisions = store.listRevisions(projectSlug, identifier);
   return layout(
     document.title,
-    `<p><a href="/projects/${encodeURIComponent(projectSlug)}">← Project</a></p>
+    `<p><a href="/projects/${encodeURIComponent(projectSlug)}">← プロジェクト</a></p>
      <h1>${escapeHtml(document.title)}</h1>
-     <p class="meta">${escapeHtml(document.doc)} · revision ${document.revision} · ${escapeHtml(document.author)} · ${escapeHtml(document.updated_at)}</p>
+     <p class="meta">${escapeHtml(document.doc)} · リビジョン ${document.revision} · ${escapeHtml(document.author)} · ${escapeHtml(formatJst(document.updated_at))}</p>
      <div class="grid">
        <article class="card markdown">${renderMarkdown(document.body)}</article>
-       <aside class="card"><h2>Revision history</h2><ol>${revisions
+       <aside class="card"><h2>リビジョン履歴</h2><ol>${revisions
          .map(
            (item) =>
-             `<li><a href="/projects/${encodeURIComponent(projectSlug)}/document?doc=${encodeURIComponent(identifier)}&revision=${item.revision}">revision ${item.revision}</a>
-              <span class="meta">${escapeHtml(item.author)} · ${escapeHtml(item.created_at)}${item.note ? ` · ${escapeHtml(item.note)}` : ""}</span></li>`,
+             `<li><a href="/projects/${encodeURIComponent(projectSlug)}/document?doc=${encodeURIComponent(identifier)}&revision=${item.revision}">リビジョン ${item.revision}</a>
+              <span class="meta">${escapeHtml(item.author)} · ${escapeHtml(formatJst(item.created_at))}${item.note ? ` · ${escapeHtml(item.note)}` : ""}</span></li>`,
          )
          .join("")}</ol></aside>
      </div>`,
@@ -239,12 +276,12 @@ function documentPage(store, projectSlug, identifier, revision) {
 
 function participantRow(participant) {
   const badges = [
-    participant.ball.has_ball ? '<span class="badge ball">has ball</span>' : "",
-    participant.abandoned ? '<span class="badge danger">abandoned</span>' : "",
+    participant.ball.has_ball ? '<span class="badge ball">ボールあり</span>' : "",
+    participant.abandoned ? '<span class="badge danger">離脱</span>' : "",
   ].join("");
   return `<tr><td>${escapeHtml(participant.identifier)}</td><td>${escapeHtml(participant.role)}</td>
-    <td>${badges || '<span class="badge">waiting</span>'}</td>
-    <td class="meta">${escapeHtml(participant.last_heartbeat_at ?? "no heartbeat")}</td></tr>`;
+    <td>${badges || '<span class="badge">ボールなし</span>'}</td>
+    <td class="meta">${escapeHtml(formatJst(participant.last_heartbeat_at))}</td></tr>`;
 }
 
 function messageCard(message, projectSlug, workSlug) {
@@ -254,17 +291,17 @@ function messageCard(message, projectSlug, workSlug) {
           <input type="hidden" name="type" value="answer">
           <input type="hidden" name="reply_to" value="${message.seq}">
           <input type="hidden" name="to" value="${escapeHtml(message.from)}">
-          <label>Answer<textarea name="body" required></textarea></label>
-          <button type="submit">Answer as owner</button>
+          <label>回答<textarea name="body" required></textarea></label>
+          <button type="submit">オーナーとして回答</button>
         </form>`
       : "";
   return `<article class="card message ${escapeHtml(message.type)}">
     <div><span class="badge">${escapeHtml(message.type)} #${message.seq}</span>
       <strong>${escapeHtml(message.from)}</strong>
-      ${message.closed_at ? '<span class="badge">closed</span>' : ""}</div>
-    <p class="meta">to: ${escapeHtml(message.to.join(", ") || "—")} · reply_to: ${escapeHtml(message.reply_to ?? "—")} · ${escapeHtml(message.created_at)}</p>
+      ${message.closed_at ? '<span class="badge">クローズ済み</span>' : ""}</div>
+    <p class="meta">宛先: ${escapeHtml(message.to.join(", ") || "—")} · 返信先: ${escapeHtml(message.reply_to ?? "—")} · ${escapeHtml(formatJst(message.created_at))}</p>
     <div class="markdown">${renderMarkdown(message.body)}</div>
-    ${message.refs.length ? `<p class="meta">refs: ${message.refs.map(escapeHtml).join(", ")}</p>` : ""}
+    ${message.refs.length ? `<p class="meta">参照: ${message.refs.map(escapeHtml).join(", ")}</p>` : ""}
     ${answerForm}
   </article>`;
 }
@@ -273,18 +310,18 @@ function workPage(store, projectSlug, slug) {
   const work = store.getWork(projectSlug, slug);
   return layout(
     work.title,
-    `<p><a href="/projects/${encodeURIComponent(work.project)}">← Project</a></p>
+    `<p><a href="/projects/${encodeURIComponent(work.project)}">← プロジェクト</a></p>
      <h1>${escapeHtml(work.title)}</h1>
-     <p class="meta">${escapeHtml(work.slug)} · <span class="badge">${escapeHtml(work.state)}</span></p>
-     <section class="card"><h2>Participants</h2><table><thead><tr><th>Identifier</th><th>Role</th><th>State</th><th>Heartbeat</th></tr></thead>
-       <tbody>${work.participants.map(participantRow).join("")}</tbody></table></section>
-     <section><h2>Conversation</h2>${work.messages.map((message) => messageCard(message, projectSlug, slug)).join("") || '<p class="card">No messages.</p>'}</section>
-     <section class="card"><h2>Post as owner</h2>
+     <p class="meta">${escapeHtml(work.slug)} · <span class="badge">${escapeHtml(workStateLabel(work.state))}</span></p>
+     <section class="card"><h2>参加者</h2><table><thead><tr><th>識別子</th><th>ロール</th><th>状態</th><th>最終心拍</th></tr></thead>
+       <tbody>${work.participants.map(participantRow).join("") || '<tr><td colspan="4">参加者はまだいません。</td></tr>'}</tbody></table></section>
+     <section><h2>会話</h2>${work.messages.map((message) => messageCard(message, projectSlug, slug)).join("") || '<p class="card">メッセージはまだありません。</p>'}</section>
+     <section class="card"><h2>オーナーとして投稿</h2>
        <form method="post" action="/projects/${encodeURIComponent(projectSlug)}/works/${encodeURIComponent(slug)}/messages">
-         <label>Type<select name="type"><option value="message">message</option><option value="decision">decision</option></select></label>
-         <label>Recipients (comma separated)<input name="to"></label>
-         <label>Body<textarea name="body" required></textarea></label>
-         <button type="submit">Post</button>
+         <label>種別<select name="type"><option value="message">message</option><option value="decision">decision</option></select></label>
+         <label>宛先（カンマ区切り）<input name="to"></label>
+         <label>本文<textarea name="body" required></textarea></label>
+         <button type="submit">投稿</button>
        </form>
      </section>`,
   );
