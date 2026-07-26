@@ -418,6 +418,13 @@ async function routeApi(request, response, url, store) {
     return true;
   }
 
+  if (path === "/api/v1/activation-inbox" && method === "GET") {
+    json(response, 200, {
+      awaiting_activation: store.activationInbox(),
+    });
+    return true;
+  }
+
   if (path === "/api/v1/import" && method === "POST") {
     json(response, 201, store.importBundle(await readJson(request)));
     return true;

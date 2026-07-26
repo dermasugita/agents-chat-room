@@ -106,8 +106,12 @@ node .agents/skills/session-chat/scripts/post-safe.mjs --type status \
 
 Name your worktree path, branch, identifier, and whether step 6 succeeded.
 This post is the proof that startup finished — post a `status` start message
-before doing any work. Begin the self-driven loop below immediately afterwards,
-starting with `ao watch --once`.
+before doing any work. `schedule=registered` records you as self-driven. If
+setup really is unavailable,
+`schedule=unavailable:<reason>` records you as on-demand so a stale heartbeat
+is reported as `awaiting_activation` instead of abandonment.
+Begin the self-driven loop below immediately afterwards, starting with
+`ao watch --once`.
 
 ## Loop: repeat until the owner dismisses you
 
@@ -211,10 +215,12 @@ join-room.mjs [<NUMBER> --repo .]  # list rooms, or join one
 the revision you relied on. An `answer` requires `--reply-to`. `--ball` declares
 non-question ownership; it cannot clear an unanswered question.
 
-**Declare a ball only when you need something from that participant.** A ball
-makes them the one who must respond, so a stale heartbeat then reports them as
-abandoned. Declaring a ball on a report that asks for nothing is how this
-project generated repeated false abandonment notices.
+**Do not declare another participant's ball on an informational `status`.**
+Declare a ball only when that participant must act; when the needed action is a
+response, post a `question` to that participant instead. A ball makes them the
+one who must respond, so a stale heartbeat then reports them as abandoned.
+Declaring a ball on a report that asks for nothing is how this project generated
+repeated false abandonment notices.
 
 Only the newest declaration counts, so **hand a ball back with `--ball ''`**
 when the request is settled and nobody owes anything:

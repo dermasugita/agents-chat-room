@@ -11,6 +11,7 @@ const MESSAGE_TYPES = new Set([
   "resolve",
 ]);
 const ROLES = new Set(["owner", "designer", "implementer"]);
+const ATTENDANCE_MODES = new Set(["self-driven", "on-demand"]);
 const DOCUMENT_KINDS = new Set(["context", "adr", "handoff"]);
 const SLUG_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const ABANDONED_AFTER_MS = 3 * 60 * 1_000;
@@ -49,6 +50,22 @@ function normalizeTime(value) {
     `Invalid timestamp: ${value}`,
   );
   return parsed.toISOString();
+}
+
+function attendanceModeFromStatus(input) {
+  if (input.type !== "status" || typeof input.body !== "string") {
+    return undefined;
+  }
+  const schedule = input.body.match(
+    /(?:^|\s)schedule=(registered|unavailable)(?=[:(\s]|$)/,
+  )?.[1];
+  if (schedule === "registered") {
+    return "self-driven";
+  }
+  if (schedule === "unavailable") {
+    return "on-demand";
+  }
+  return undefined;
 }
 
 export function createStore(database, options = {}) {
@@ -199,7 +216,9 @@ export function createStore(database, options = {}) {
 
   function registerParticipant(workId, identifier, role, seenAt) {
     const existing = database
-      .prepare("SELECT role FROM participant WHERE work_id = ? AND identifier = ?")
+      .prepare(
+        "SELECT role FROM participant WHERE work_id = ? AND identifier = ?",
+      )
       .get(workId, identifier);
     if (existing) {
       assert(
@@ -214,13 +233,33 @@ export function createStore(database, options = {}) {
       );
       return;
     }
+    const inheritedAttendance = database
+      .prepare(
+        `SELECT project_participant.attendance_mode
+         FROM work AS current_work
+         JOIN work AS project_work
+           ON project_work.project_id = current_work.project_id
+         JOIN participant AS project_participant
+           ON project_participant.work_id = project_work.id
+         WHERE current_work.id = ?
+           AND project_participant.identifier = ?
+         LIMIT 1`,
+      )
+      .get(workId, identifier)?.attendance_mode;
     database
       .prepare(
         `INSERT INTO participant(
-           work_id, identifier, role, first_seen_at, last_heartbeat_at
-         ) VALUES (?, ?, ?, ?, NULL)`,
+           work_id, identifier, role, attendance_mode,
+           first_seen_at, last_heartbeat_at
+         ) VALUES (?, ?, ?, ?, ?, NULL)`,
       )
-      .run(workId, identifier, role, seenAt);
+      .run(
+        workId,
+        identifier,
+        role,
+        inheritedAttendance ?? "self-driven",
+        seenAt,
+      );
   }
 
   function touchParticipant(workId, identifier, role, seenAt) {
@@ -233,6 +272,29 @@ export function createStore(database, options = {}) {
         )
         .run(seenAt, workId, identifier);
     }
+  }
+
+  function setAttendanceMode(workId, identifier, attendanceMode) {
+    assert(
+      ATTENDANCE_MODES.has(attendanceMode),
+      400,
+      "invalid_request",
+      "attendance_mode is invalid",
+    );
+    database
+      .prepare(
+        `UPDATE participant
+         SET attendance_mode = ?
+         WHERE identifier = ?
+           AND work_id IN (
+             SELECT project_work.id
+             FROM work AS current_work
+             JOIN work AS project_work
+               ON project_work.project_id = current_work.project_id
+             WHERE current_work.id = ?
+           )`,
+      )
+      .run(attendanceMode, identifier, workId);
   }
 
   function ballFor(workId, identifier) {
@@ -353,13 +415,18 @@ export function createStore(database, options = {}) {
                AND project_participant.identifier = ?`,
           )
           .get(workId, participant.identifier).latest;
-        const abandoned =
+        const staleWithBall =
           participant.role !== "owner" &&
           ball.has_ball &&
           new Date(projectActivity ?? heartbeat).getTime() < cutoff;
+        const abandoned =
+          staleWithBall && participant.attendance_mode === "self-driven";
+        const awaitingActivation =
+          staleWithBall && participant.attendance_mode === "on-demand";
         return {
           identifier: participant.identifier,
           role: participant.role,
+          attendance_mode: participant.attendance_mode,
           first_seen_at: participant.first_seen_at,
           last_heartbeat_at: participant.last_heartbeat_at,
           present:
@@ -367,6 +434,7 @@ export function createStore(database, options = {}) {
             new Date(participant.last_heartbeat_at).getTime() >= cutoff,
           ball,
           abandoned,
+          awaiting_activation: awaitingActivation,
         };
       });
   }
@@ -1204,8 +1272,12 @@ export function createStore(database, options = {}) {
                 present: participant?.present ?? false,
                 first_seen_at: participant?.first_seen_at ?? null,
                 last_heartbeat_at: participant?.last_heartbeat_at ?? null,
+                attendance_mode:
+                  participant?.attendance_mode ?? "self-driven",
                 ball: participant?.ball ?? { has_ball: false, reasons: [] },
                 abandoned: participant?.abandoned ?? false,
+                awaiting_activation:
+                  participant?.awaiting_activation ?? false,
               }
             : null,
         };
@@ -1561,6 +1633,10 @@ export function createStore(database, options = {}) {
       );
 
       touchParticipant(work.id, input.from, input.role, createdAt);
+      const attendanceMode = attendanceModeFromStatus(input);
+      if (attendanceMode !== undefined) {
+        setAttendanceMode(work.id, input.from, attendanceMode);
+      }
       const seq = database
         .prepare(
           "SELECT COALESCE(MAX(seq), 0) + 1 AS next FROM message WHERE work_id = ?",
@@ -1729,6 +1805,13 @@ export function createStore(database, options = {}) {
         last_heartbeat_at: participant.last_heartbeat_at,
         ball_reasons: participant.ball.reasons,
       }));
+    const awaitingActivation = participantStates(work.id, identifier)
+      .filter((participant) => participant.awaiting_activation)
+      .map((participant) => ({
+        identifier: participant.identifier,
+        last_heartbeat_at: participant.last_heartbeat_at,
+        ball_reasons: participant.ball.reasons,
+      }));
 
     return {
       messages: listMessages(projectSlug, workSlug, since),
@@ -1737,6 +1820,7 @@ export function createStore(database, options = {}) {
         ? "No participant has acted for 5 minutes and you do not hold the ball. Re-check the work state or ask who should act next."
         : null,
       abandoned,
+      awaiting_activation: awaitingActivation,
       stale_expectations: staleExpectations(work.id, identifier),
       heartbeat_at: heartbeatAt,
     };
@@ -1770,6 +1854,30 @@ export function createStore(database, options = {}) {
       work: row.work_slug,
       message: hydrateMessage(row),
     }));
+  }
+
+  function activationInbox() {
+    return database
+      .prepare(
+        `SELECT work.id, work.slug AS work_slug, project.slug AS project_slug
+         FROM work
+         JOIN project ON project.id = work.project_id
+         ORDER BY project.slug, work.slug`,
+      )
+      .all()
+      .flatMap((work) =>
+        participantStates(work.id)
+          .filter((participant) => participant.awaiting_activation)
+          .map((participant) => ({
+            project: work.project_slug,
+            work: work.work_slug,
+            identifier: participant.identifier,
+            role: participant.role,
+            attendance_mode: participant.attendance_mode,
+            last_heartbeat_at: participant.last_heartbeat_at,
+            ball_reasons: participant.ball.reasons,
+          })),
+      );
   }
 
   function getWork(projectSlug, workSlug) {
@@ -2310,6 +2418,7 @@ export function createStore(database, options = {}) {
 
   return {
     addIssueComment,
+    activationInbox,
     ballFor,
     closeQuestion,
     closeIssue,

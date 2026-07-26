@@ -1767,6 +1767,49 @@ test("watch emits each message as one distinguishable line", async () => {
   assert.match(messageLine, /line one\\nline two/);
 });
 
+test("watch distinguishes awaiting activation from abandonment", async () => {
+  const repository = makeRepository("activation-watcher");
+  await injectRepository(repository, "activation-watcher");
+  store.postMessage("sample", "work-one", {
+    idempotency_key: crypto.randomUUID(),
+    from: "on-demand-agent",
+    role: "implementer",
+    type: "status",
+    body: "schedule=unavailable:no-scheduler first-unit=resume",
+    to: [],
+    refs: [],
+  });
+  store.postMessage("sample", "work-one", {
+    idempotency_key: crypto.randomUUID(),
+    from: "designer",
+    role: "designer",
+    type: "question",
+    body: "Please resume",
+    to: ["on-demand-agent"],
+    refs: [],
+  });
+  database
+    .prepare(
+      `UPDATE participant SET last_heartbeat_at = ?
+       WHERE identifier = ?`,
+    )
+    .run("2020-01-01T00:00:00.000Z", "on-demand-agent");
+
+  const watched = await runCli(
+    ["watch", "--once", "--since", "9999"],
+    repository,
+  );
+  assert.equal(watched.code, 0, watched.stderr);
+  assert.match(
+    watched.stdout,
+    /AWAITING_ACTIVATION identifier=on-demand-agent/,
+  );
+  assert.doesNotMatch(
+    watched.stdout,
+    /ABANDONED identifier=on-demand-agent/,
+  );
+});
+
 test("active CLI commands refresh heartbeat while persistent watch does not", async () => {
   const repository = makeRepository("heartbeat-cli");
   await injectRepository(repository, "heartbeat-cli");
@@ -2365,6 +2408,36 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(sessionSkill, /post-safe\.mjs --type status/);
   assert.match(
     sessionSkill,
+    /schedule=registered.*self-driven.*schedule=unavailable:<reason>.*on-demand.*awaiting_activation/s,
+  );
+  assert.match(
+    sessionSkill,
+    /resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`/,
+  );
+  assert.match(
+    sessionSkill,
+    /Do not declare another participant's ball on an informational `status`/,
+  );
+  assert.match(
+    sessionSkill,
+    /Committing and pushing to your own work branch are pre-authorized/,
+  );
+  assert.match(sessionSkill, /without asking or waiting/);
+  assert.match(
+    sessionSkill,
+    /Publication requires an explicit owner instruction/,
+  );
+  for (const protectedAction of [
+    "pull request",
+    "main",
+    "branch held by someone else",
+    "restart production",
+    "delete anything nonempty",
+  ]) {
+    assert.match(sessionSkill, new RegExp(protectedAction));
+  }
+  assert.match(
+    sessionSkill,
     /post-safe\.mjs --type <type> --body <text> \[--to ID\] \[--reply-to SEQ\] \[--ball ID\]/,
   );
   assert.match(sessionSkill, /`--ref` adds references/);
@@ -2404,6 +2477,18 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(designerSkill, /Confirm it fired at least once/);
   assert.match(
     designerSkill,
+    /schedule=registered.*self-driven.*schedule=unavailable:<reason>.*on-demand.*awaiting_activation/s,
+  );
+  assert.match(
+    designerSkill,
+    /resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`/,
+  );
+  assert.match(
+    designerSkill,
+    /Do not declare another participant's ball on an informational `status`/,
+  );
+  assert.match(
+    designerSkill,
     /identifier=<id> project=<slug> works=<n> schedule=<registered\|unavailable:<reason>> first-unit=<what>/,
   );
   assert.match(designerSkill, /Do not use a worktree for designing/);
@@ -2421,6 +2506,15 @@ test("service skill templates contain none of the retired file protocol", () => 
   assert.match(designerSkill, /Never guess owner-specific facts/);
   assert.match(designerSkill, /`AO_IDENTIFIER=designer AO_ROLE=designer`/);
   assert.match(designerSkill, /Never put identity\s+in the user-level/);
+  const grillWithDocsSkill = templateContents[2];
+  assert.match(
+    grillWithDocsSkill,
+    /resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`/,
+  );
+  assert.match(
+    grillWithDocsSkill,
+    /Do not declare another participant's ball on an informational `status`/,
+  );
   const designerScript = resolve(
     "templates/skills/design-handoff/scripts/designer-start.mjs",
   );

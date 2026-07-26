@@ -408,16 +408,32 @@ function inboxCard(question) {
   </article>`;
 }
 
+function activationCard(participant) {
+  return `<article class="card">
+    <div><span class="badge ball">起動待ち</span>
+      <strong>${escapeHtml(participant.identifier)}</strong>
+      <span class="badge">${escapeHtml(participant.role)}</span></div>
+    <p class="meta"><a href="/projects/${encodeURIComponent(participant.project)}">${escapeHtml(participant.project)}</a>
+      / <a href="/projects/${encodeURIComponent(participant.project)}/works/${encodeURIComponent(participant.work)}">${escapeHtml(participant.work)}</a></p>
+    <p class="meta">最終心拍: ${escapeHtml(participant.last_heartbeat_at ? `${formatJst(participant.last_heartbeat_at)}（${formatElapsed(participant.last_heartbeat_at)}）` : "未接続")}</p>
+    <p class="meta">ボール: ${escapeHtml(JSON.stringify(participant.ball_reasons))}</p>
+  </article>`;
+}
+
 function home(store) {
   const projects = store.listProjects();
   const questions = store.inbox("owner");
+  const awaitingActivation = store.activationInbox();
   return layout(
     "プロジェクト",
     `<h1>プロジェクト</h1>
      <div class="grid">${projects.map(projectCard).join("") || '<p class="card">プロジェクトはまだありません。</p>'}</div>
      <h1>オーナー受信箱</h1>
      <p class="meta">全プロジェクトの <code>owner</code> 宛未回答 <code>question</code>。</p>
-     <div class="grid">${questions.map(inboxCard).join("") || '<p class="card">未回答の question はありません。</p>'}</div>`,
+     <div class="grid">${questions.map(inboxCard).join("") || '<p class="card">未回答の question はありません。</p>'}</div>
+     <h1>いま起こすべき参加者</h1>
+     <p class="meta">全プロジェクトの <code>awaiting_activation</code>。起動待ちでボールを持つ参加者です。</p>
+     <div class="grid">${awaitingActivation.map(activationCard).join("") || '<p class="card">起動待ちの参加者はいません。</p>'}</div>`,
     sidebar(store),
   );
 }
@@ -608,9 +624,15 @@ function participantRow(participant) {
   const badges = [
     participant.expected ? '<span class="badge">担当枠</span>' : "",
     participant.waiting ? '<span class="badge">参加待ち</span>' : "",
+    participant.attendance_mode === "on-demand"
+      ? '<span class="badge">起動待ち型</span>'
+      : '<span class="badge">自走型</span>',
     participant.ball.has_ball ? '<span class="badge ball">ボールあり</span>' : "",
     !participant.ball.has_ball ? '<span class="badge">ボールなし</span>' : "",
     participant.abandoned ? '<span class="badge danger">離脱</span>' : "",
+    participant.awaiting_activation
+      ? '<span class="badge ball">起動待ち</span>'
+      : "",
   ].join("");
   return `<tr><td>${escapeHtml(participant.identifier)}</td><td>${escapeHtml(participant.role)}</td>
     <td>${badges}</td>
@@ -631,9 +653,11 @@ function participantsForDisplay(work) {
         ...expected,
         expected: true,
         waiting: true,
+        attendance_mode: "self-driven",
         last_heartbeat_at: null,
         ball: { has_ball: false, reasons: [] },
         abandoned: false,
+        awaiting_activation: false,
       };
   return [
     expectedRow,

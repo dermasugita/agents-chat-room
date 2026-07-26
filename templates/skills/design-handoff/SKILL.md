@@ -68,6 +68,10 @@ ao post --type status --work <SLUG> \
   --body "identifier=<id> project=<slug> works=<n> schedule=<registered|unavailable:<reason>> first-unit=<what>"
 ```
 
+`schedule=registered` records a self-driven participant.
+`schedule=unavailable:<reason>` records an on-demand participant, whose stale
+heartbeat is reported as `awaiting_activation` rather than abandonment.
+
 ### Then loop
 
 ```sh
@@ -136,13 +140,13 @@ Communicate through `ao post` and attach the revisions you relied on with
 in the thread. Do not take owner-only or implementer choices on behalf of
 another role.
 
-**Declare a ball only when you need something from that participant**, and hand
-it back with `--ball ''` once the request is settled. Only the newest
-declaration counts. A ball makes its holder the one who must respond, so a
-stale heartbeat then reports them as abandoned; balls left on settled requests
-are why this project produced repeated false abandonment notices. Reviewing an
-implementer's report and then leaving your own ball declared is the same
-mistake in the opposite direction.
+Do not declare another participant's ball on an informational `status`.
+Declare a ball only when that participant must act; when the required action
+is a response, use a `question` addressed to that participant. Hand the ball
+back with `--ball ''` once the request is settled; only the newest declaration
+counts. A ball makes its holder the one who must respond, so a stale heartbeat
+then reports them as abandoned. Balls left on settled requests are why this
+project produced repeated false abandonment notices.
 
 ## Self-driven monitoring
 
@@ -162,6 +166,10 @@ least every two minutes during long work, and continue after resolve until the
 owner explicitly dismisses you. If an external condition blocks you, post
 exactly what you are waiting for and keep running the same cycle; never end
 with only “wait”.
+
+Assume the runtime can stop between turns. Before a turn ends, post one concise
+resume-point `status` with `done=`, `in-progress=`, `next=`, and `blocked-by=`.
+Do as much safe work as the turn permits before leaving that checkpoint.
 
 A persistent `ao watch` is only a supplemental delivery process for Claude
 Code-style runtimes. It does not update your heartbeat and is not a substitute

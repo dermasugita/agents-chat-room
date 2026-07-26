@@ -1007,6 +1007,7 @@ async function designProject(parsed) {
       your_ball: result.your_ball,
       idle_nudge: result.idle_nudge,
       abandoned: result.abandoned,
+      awaiting_activation: result.awaiting_activation,
       stale_expectations: result.stale_expectations,
       heartbeat_at: result.heartbeat_at,
     })),
@@ -1046,7 +1047,9 @@ function roomLabel(room, index) {
   const heartbeat = room.presence?.last_heartbeat_at ?? "none";
   const ball = room.presence?.ball?.has_ball ?? false;
   const abandoned = room.presence?.abandoned ?? false;
-  return `${index + 1}. ${room.project.slug} / ${room.work.slug}  ${room.work.title}  slot=${expected} presence=${presence} heartbeat=${heartbeat} ball=${ball} abandoned=${abandoned} state=${room.work.state}`;
+  const awaitingActivation =
+    room.presence?.awaiting_activation ?? false;
+  return `${index + 1}. ${room.project.slug} / ${room.work.slug}  ${room.work.title}  slot=${expected} presence=${presence} heartbeat=${heartbeat} ball=${ball} abandoned=${abandoned} awaiting_activation=${awaitingActivation} state=${room.work.state}`;
 }
 
 async function roomsCommand(parsed) {
@@ -1193,6 +1196,7 @@ async function joinRoom(parsed) {
     your_ball: thread.your_ball,
     idle_nudge: thread.idle_nudge,
     abandoned: thread.abandoned,
+    awaiting_activation: thread.awaiting_activation,
     stale_expectations: thread.stale_expectations,
     skills,
     next: [
@@ -1821,6 +1825,11 @@ function emitPoll(result, prefix = "") {
       `${prefix}ABANDONED identifier=${participant.identifier} last_heartbeat_at=${participant.last_heartbeat_at ?? "never"} reasons=${JSON.stringify(participant.ball_reasons)}`,
     );
   }
+  for (const participant of result.awaiting_activation ?? []) {
+    console.log(
+      `${prefix}AWAITING_ACTIVATION identifier=${participant.identifier} last_heartbeat_at=${participant.last_heartbeat_at ?? "never"} reasons=${JSON.stringify(participant.ball_reasons)}`,
+    );
+  }
   for (const expectation of result.stale_expectations) {
     console.log(
       `${prefix}STALE doc=${expectation.doc} you_have=${expectation.you_have} current=${expectation.current}`,
@@ -1917,7 +1926,7 @@ async function watchProject(context, parsed) {
       }
       for (const { work, result } of results) {
         console.log(
-          `PROJECT_WORK project=${context.config.project} work=${work.slug} heartbeat=${result.heartbeat_at ?? "none"} ball=${result.your_ball.has_ball} idle=${result.idle_nudge !== null} abandoned=${result.abandoned.length}`,
+          `PROJECT_WORK project=${context.config.project} work=${work.slug} heartbeat=${result.heartbeat_at ?? "none"} ball=${result.your_ball.has_ball} idle=${result.idle_nudge !== null} abandoned=${result.abandoned.length} awaiting_activation=${(result.awaiting_activation ?? []).length}`,
         );
         emitPoll(
           result,

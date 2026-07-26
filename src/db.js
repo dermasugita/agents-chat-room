@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 const ISSUE_SCHEMA = `
 CREATE TABLE IF NOT EXISTS issue (
@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS participant (
   work_id           INTEGER NOT NULL REFERENCES work(id),
   identifier        TEXT NOT NULL,
   role              TEXT NOT NULL CHECK (role IN ('owner','designer','implementer')),
+  attendance_mode   TEXT NOT NULL DEFAULT 'self-driven'
+                    CHECK (attendance_mode IN ('self-driven','on-demand')),
   first_seen_at     TEXT NOT NULL,
   last_heartbeat_at TEXT,
   UNIQUE (work_id, identifier)
@@ -174,13 +176,41 @@ export function createDatabase(path = ":memory:") {
   database.exec(SCHEMA);
 
   const current = database.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version;
-  if (current === null) {
-    database.prepare(
-      "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
-    ).run(SCHEMA_VERSION, new Date().toISOString());
-  } else if (current === 1) {
+  const recordVersion = (version) =>
+    database
+      .prepare("INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)")
+      .run(version, new Date().toISOString());
+  const addAttendanceMode = () => {
+    const columns = new Set(
+      database
+        .prepare("PRAGMA table_info(participant)")
+        .all()
+        .map(({ name }) => name),
+    );
+    if (!columns.has("attendance_mode")) {
+      database.exec(
+        `ALTER TABLE participant
+         ADD COLUMN attendance_mode TEXT NOT NULL DEFAULT 'self-driven'
+         CHECK (attendance_mode IN ('self-driven','on-demand'))`,
+      );
+    }
+  };
+  const migrate = (operation) => {
     database.exec("BEGIN IMMEDIATE");
     try {
+      operation();
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      database.close();
+      throw error;
+    }
+  };
+
+  if (current === null) {
+    recordVersion(SCHEMA_VERSION);
+  } else if (current === 1) {
+    migrate(() => {
       database.exec(
         "ALTER TABLE work ADD COLUMN expected_participant_identifier TEXT",
       );
@@ -188,32 +218,24 @@ export function createDatabase(path = ":memory:") {
         `ALTER TABLE work ADD COLUMN expected_participant_role TEXT
          CHECK (expected_participant_role IN ('owner','designer','implementer'))`,
       );
-      database.prepare(
-        "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
-      ).run(2, new Date().toISOString());
+      recordVersion(2);
       database.exec(ISSUE_SCHEMA);
-      database.prepare(
-        "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
-      ).run(SCHEMA_VERSION, new Date().toISOString());
-      database.exec("COMMIT");
-    } catch (error) {
-      database.exec("ROLLBACK");
-      database.close();
-      throw error;
-    }
+      recordVersion(3);
+      addAttendanceMode();
+      recordVersion(4);
+    });
   } else if (current === 2) {
-    database.exec("BEGIN IMMEDIATE");
-    try {
+    migrate(() => {
       database.exec(ISSUE_SCHEMA);
-      database.prepare(
-        "INSERT INTO schema_meta(version, migrated_at) VALUES (?, ?)",
-      ).run(SCHEMA_VERSION, new Date().toISOString());
-      database.exec("COMMIT");
-    } catch (error) {
-      database.exec("ROLLBACK");
-      database.close();
-      throw error;
-    }
+      recordVersion(3);
+      addAttendanceMode();
+      recordVersion(4);
+    });
+  } else if (current === 3) {
+    migrate(() => {
+      addAttendanceMode();
+      recordVersion(4);
+    });
   } else if (current !== SCHEMA_VERSION) {
     database.close();
     throw new Error(

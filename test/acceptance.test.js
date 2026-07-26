@@ -70,7 +70,7 @@ test("database connections enforce WAL, foreign keys, and busy timeout", () => {
   });
 });
 
-test("schema version 1 migrates expected-participant and issue tables without losing work", () => {
+test("schema version 1 migrates through issues and attendance without losing work", () => {
   const path = join(temporaryDirectory, "schema-v1.sqlite");
   const legacy = new DatabaseSync(path);
   legacy.exec(`
@@ -101,7 +101,14 @@ test("schema version 1 migrates expected-participant and issue tables without lo
   const migrated = createDatabase(path);
   assert.equal(
     migrated.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version,
-    3,
+    4,
+  );
+  assert.deepEqual(
+    migrated
+      .prepare("SELECT version FROM schema_meta ORDER BY version")
+      .all()
+      .map(({ version }) => version),
+    [1, 2, 3, 4],
   );
   assert.deepEqual(
     {
@@ -130,10 +137,17 @@ test("schema version 1 migrates expected-participant and issue tables without lo
       .map(({ name }) => name),
     ["issue", "issue_comment"],
   );
+  assert.equal(
+    migrated
+      .prepare("PRAGMA table_info(participant)")
+      .all()
+      .some(({ name }) => name === "attendance_mode"),
+    true,
+  );
   migrated.close();
 });
 
-test("schema version 2 migrates issue tables without losing projects", () => {
+test("schema version 2 migrates issues and attendance without losing participants", () => {
   const path = join(temporaryDirectory, "schema-v2.sqlite");
   const legacy = new DatabaseSync(path);
   legacy.exec(`
@@ -156,14 +170,38 @@ test("schema version 2 migrates issue tables without losing projects", () => {
       created_at TEXT NOT NULL,
       UNIQUE(project_id, slug)
     );
+    CREATE TABLE participant(
+      id INTEGER PRIMARY KEY,
+      work_id INTEGER NOT NULL REFERENCES work(id),
+      identifier TEXT NOT NULL,
+      role TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_heartbeat_at TEXT,
+      UNIQUE(work_id, identifier)
+    );
     INSERT INTO project VALUES (1, 'legacy-v2', 'Legacy v2', '2026-07-25T00:00:00.000Z');
+    INSERT INTO work VALUES (
+      1, 1, 'kept-work', 'Kept work', 'open', NULL, NULL,
+      '2026-07-25T00:00:00.000Z'
+    );
+    INSERT INTO participant VALUES (
+      1, 1, 'legacy-impl', 'implementer',
+      '2026-07-25T00:00:00.000Z', '2026-07-25T00:01:00.000Z'
+    );
   `);
   legacy.close();
 
   const migrated = createDatabase(path);
   assert.equal(
     migrated.prepare("SELECT MAX(version) AS version FROM schema_meta").get().version,
-    3,
+    4,
+  );
+  assert.deepEqual(
+    migrated
+      .prepare("SELECT version FROM schema_meta ORDER BY version")
+      .all()
+      .map(({ version }) => version),
+    [2, 3, 4],
   );
   assert.equal(
     migrated.prepare("SELECT name FROM project WHERE slug = 'legacy-v2'").get().name,
@@ -180,6 +218,129 @@ test("schema version 2 migrates issue tables without losing projects", () => {
       .map(({ name }) => name),
     ["issue", "issue_comment"],
   );
+  assert.deepEqual(
+    {
+      ...migrated
+        .prepare(
+          `SELECT identifier, role, attendance_mode, last_heartbeat_at
+           FROM participant`,
+        )
+        .get(),
+    },
+    {
+      identifier: "legacy-impl",
+      role: "implementer",
+      attendance_mode: "self-driven",
+      last_heartbeat_at: "2026-07-25T00:01:00.000Z",
+    },
+  );
+  migrated.close();
+});
+
+test("schema version 3 preserves issues while adding attendance mode", () => {
+  const path = join(temporaryDirectory, "schema-v3.sqlite");
+  const legacy = new DatabaseSync(path);
+  legacy.exec(`
+    CREATE TABLE schema_meta(version INTEGER NOT NULL, migrated_at TEXT NOT NULL);
+    INSERT INTO schema_meta VALUES (3, '2026-07-25T00:00:00.000Z');
+    CREATE TABLE project(
+      id INTEGER PRIMARY KEY,
+      slug TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE work(
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES project(id),
+      slug TEXT NOT NULL,
+      title TEXT NOT NULL,
+      state TEXT NOT NULL,
+      expected_participant_identifier TEXT,
+      expected_participant_role TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(project_id, slug)
+    );
+    CREATE TABLE participant(
+      id INTEGER PRIMARY KEY,
+      work_id INTEGER NOT NULL REFERENCES work(id),
+      identifier TEXT NOT NULL,
+      role TEXT NOT NULL,
+      first_seen_at TEXT NOT NULL,
+      last_heartbeat_at TEXT,
+      UNIQUE(work_id, identifier)
+    );
+    CREATE TABLE issue(
+      id INTEGER PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES project(id),
+      number INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      state TEXT NOT NULL,
+      origin_project TEXT NOT NULL,
+      origin_identifier TEXT NOT NULL,
+      origin_role TEXT NOT NULL,
+      origin_work TEXT,
+      created_at TEXT NOT NULL,
+      closed_at TEXT,
+      closed_by TEXT,
+      close_reason TEXT,
+      UNIQUE(project_id, number)
+    );
+    CREATE TABLE issue_comment(
+      id INTEGER PRIMARY KEY,
+      issue_id INTEGER NOT NULL REFERENCES issue(id),
+      seq INTEGER NOT NULL,
+      body TEXT NOT NULL,
+      origin_project TEXT NOT NULL,
+      origin_identifier TEXT NOT NULL,
+      origin_role TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(issue_id, seq)
+    );
+    INSERT INTO project VALUES (1, 'legacy-v3', 'Legacy v3', '2026-07-25T00:00:00.000Z');
+    INSERT INTO work VALUES (
+      1, 1, 'kept-work', 'Kept work', 'open', NULL, NULL,
+      '2026-07-25T00:00:00.000Z'
+    );
+    INSERT INTO participant VALUES (
+      1, 1, 'legacy-impl', 'implementer',
+      '2026-07-25T00:00:00.000Z', '2026-07-25T00:01:00.000Z'
+    );
+    INSERT INTO issue VALUES (
+      1, 1, 1, 'Kept issue', 'Issue body', 'open',
+      'legacy-v3', 'legacy-impl', 'implementer', 'kept-work',
+      '2026-07-25T00:02:00.000Z', NULL, NULL, NULL
+    );
+    INSERT INTO issue_comment VALUES (
+      1, 1, 1, 'Kept comment', 'legacy-v3', 'legacy-impl',
+      'implementer', '2026-07-25T00:03:00.000Z'
+    );
+  `);
+  legacy.close();
+
+  const migrated = createDatabase(path);
+  assert.deepEqual(
+    migrated
+      .prepare("SELECT version FROM schema_meta ORDER BY version")
+      .all()
+      .map(({ version }) => version),
+    [3, 4],
+  );
+  assert.deepEqual(
+    { ...migrated.prepare("SELECT title, state FROM issue").get() },
+    { title: "Kept issue", state: "open" },
+  );
+  assert.equal(
+    migrated.prepare("SELECT body FROM issue_comment").get().body,
+    "Kept comment",
+  );
+  assert.equal(
+    migrated.prepare("SELECT attendance_mode FROM participant").get()
+      .attendance_mode,
+    "self-driven",
+  );
+  assert.equal(migrated.prepare("PRAGMA integrity_check").get().integrity_check, "ok");
+  assert.deepEqual(migrated.prepare("PRAGMA foreign_key_check").all(), []);
   migrated.close();
 });
 
@@ -359,8 +520,10 @@ test("room listing exposes the expected implementer and independent presence sta
     present: false,
     first_seen_at: null,
     last_heartbeat_at: null,
+    attendance_mode: "self-driven",
     ball: { has_ball: false, reasons: [] },
     abandoned: false,
+    awaiting_activation: false,
   });
 
   post("room-state", {
@@ -1264,6 +1427,165 @@ test("project activity prevents abandonment without moving a work-local ball", (
       ({ identifier }) => identifier === "cross-work-designer",
     ),
     true,
+  );
+});
+
+test("on-demand participants await activation across projects and can return to self-driven", async () => {
+  store.createWork("sample", {
+    slug: "other-work",
+    title: "Other work",
+  });
+  post("work-one", {
+    from: "on-demand-impl",
+    role: "implementer",
+    type: "status",
+    body: "schedule=unavailable:scheduler-stalled first-unit=inspect",
+  });
+  store.poll(
+    "sample",
+    "other-work",
+    "on-demand-impl",
+    "implementer",
+    0,
+  );
+  post("work-one", {
+    type: "question",
+    body: "Please resume the implementation",
+    to: ["on-demand-impl"],
+  });
+
+  store.createProject({ slug: "second-project", name: "Second project" });
+  store.createWork("second-project", {
+    slug: "second-work",
+    title: "Second work",
+  });
+  store.postMessage("second-project", "second-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "second-on-demand",
+    role: "designer",
+    type: "status",
+    body: "schedule=unavailable:no-runtime-wakeup first-unit=review",
+    to: [],
+    refs: [],
+  });
+  store.postMessage("second-project", "second-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "owner",
+    role: "owner",
+    type: "question",
+    body: "Please review",
+    to: ["second-on-demand"],
+    refs: [],
+  });
+
+  currentTime = new Date(currentTime.getTime() + 3 * 60_000 + 1);
+  const observed = store.poll(
+    "sample",
+    "work-one",
+    "observer",
+    "implementer",
+    0,
+  );
+  assert.equal(
+    observed.abandoned.some(
+      ({ identifier }) => identifier === "on-demand-impl",
+    ),
+    false,
+  );
+  assert.deepEqual(
+    observed.awaiting_activation.map(({ identifier }) => identifier),
+    ["on-demand-impl"],
+  );
+  const onDemand = store
+    .getWork("sample", "work-one")
+    .participants.find(({ identifier }) => identifier === "on-demand-impl");
+  assert.equal(onDemand.attendance_mode, "on-demand");
+  assert.equal(onDemand.abandoned, false);
+  assert.equal(onDemand.awaiting_activation, true);
+  assert.equal(
+    store
+      .getWork("sample", "other-work")
+      .participants.find(({ identifier }) => identifier === "on-demand-impl")
+      .attendance_mode,
+    "on-demand",
+  );
+
+  const activationInbox = store.activationInbox();
+  assert.deepEqual(
+    activationInbox.map(({ project, work, identifier }) => ({
+      project,
+      work,
+      identifier,
+    })),
+    [
+      {
+        project: "sample",
+        work: "work-one",
+        identifier: "on-demand-impl",
+      },
+      {
+        project: "second-project",
+        work: "second-work",
+        identifier: "second-on-demand",
+      },
+    ],
+  );
+
+  await withServer(async (base) => {
+    const response = await request(
+      base,
+      "GET",
+      "/api/v1/activation-inbox",
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(
+      response.body.awaiting_activation.map(
+        ({ project, work, identifier }) => ({
+          project,
+          work,
+          identifier,
+        }),
+      ),
+      activationInbox.map(({ project, work, identifier }) => ({
+        project,
+        work,
+        identifier,
+      })),
+    );
+  });
+
+  post("other-work", {
+    from: "on-demand-impl",
+    role: "implementer",
+    type: "status",
+    body: "schedule=registered first-unit=resume",
+  });
+  assert.equal(
+    store
+      .getWork("sample", "work-one")
+      .participants.find(({ identifier }) => identifier === "on-demand-impl")
+      .attendance_mode,
+    "self-driven",
+  );
+  currentTime = new Date(currentTime.getTime() + 3 * 60_000 + 1);
+  const staleAgain = store.poll(
+    "sample",
+    "work-one",
+    "observer",
+    "implementer",
+    0,
+  );
+  assert.equal(
+    staleAgain.abandoned.some(
+      ({ identifier }) => identifier === "on-demand-impl",
+    ),
+    true,
+  );
+  assert.equal(
+    staleAgain.awaiting_activation.some(
+      ({ identifier }) => identifier === "on-demand-impl",
+    ),
+    false,
   );
 });
 

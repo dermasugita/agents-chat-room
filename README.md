@@ -323,16 +323,21 @@ ao watch --work implementation
 ```
 
 `ao watch` polls every 10 seconds. New messages, idle nudges, abandonment
-warnings, stale document expectations, and ball state are each printed as one
-line. A persistent watch is delivery-only and does not refresh the
+warnings, activation requests, stale document expectations, and ball state are
+each printed as one line. A persistent watch is delivery-only and does not refresh the
 participant's heartbeat: a background process must not make an absent agent
 look attentive.
 
 Agents must actively run `ao watch --once` at least every two minutes or after
 each bounded edit or test batch, process the result, and then continue work.
 `--once`, `post`, `pull`, `push`, `messages`, `close`, and `resolve` refresh the
-attention heartbeat. If heartbeat stops while the participant holds the ball,
-other participants see it as abandoned after three minutes.
+attention heartbeat. A startup `status` containing `schedule=registered`
+declares a self-driven participant; `schedule=unavailable:<reason>` declares an
+on-demand participant. If heartbeat stops while a self-driven participant holds
+the ball, other participants see `ABANDONED` after three minutes. The same state
+for an on-demand participant is reported separately as `AWAITING_ACTIVATION`.
+The owner web home and `GET /api/v1/activation-inbox` list these on-demand
+participants across projects.
 
 CLI exit codes are stable so commands can be safely chained:
 

@@ -46,6 +46,30 @@ before(async () => {
     to: ["owner"],
     refs: ["docs/handoff/work.md"],
   });
+  store.postMessage("web-project", "web-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "on-demand-reviewer",
+    role: "designer",
+    type: "status",
+    body: "schedule=unavailable:no-scheduler first-unit=review",
+    to: [],
+    refs: [],
+  });
+  store.postMessage("web-project", "web-work", {
+    idempotency_key: crypto.randomUUID(),
+    from: "owner",
+    role: "owner",
+    type: "question",
+    body: "Please activate and review.",
+    to: ["on-demand-reviewer"],
+    refs: [],
+  });
+  database
+    .prepare(
+      `UPDATE participant SET last_heartbeat_at = ?
+       WHERE identifier = ?`,
+    )
+    .run("2020-01-01T00:00:00.000Z", "on-demand-reviewer");
   application = createHttpServer({ database, store });
   await new Promise((resolveListen) =>
     application.server.listen(0, "127.0.0.1", resolveListen),
@@ -89,6 +113,10 @@ test("web shows projects and the cross-project owner inbox", async () => {
   assert.match(html, /オーナー受信箱/);
   assert.match(html, /Owner, choose one/);
   assert.match(html, /オーナーとして回答/);
+  assert.match(html, /いま起こすべき参加者/);
+  assert.match(html, /awaiting_activation/);
+  assert.match(html, /on-demand-reviewer/);
+  assert.match(html, /起動待ち/);
   assert.match(html, /data-submit-shortcut/);
   assert.match(html, /<aside class="sidebar">/);
   assert.match(html, /aria-label="作業スレッド"/);
@@ -238,6 +266,13 @@ test("work page exposes conversation, reply links, and participant state", async
   assert.match(html, /オーナーとして投稿/);
   assert.match(html, /進行中/);
   assert.match(html, /ボールなし/);
+  assert.match(html, /自走型/);
+  assert.match(html, /起動待ち型/);
+  assert.match(html, /起動待ち/);
+  assert.doesNotMatch(
+    html.match(/<tr><td>on-demand-reviewer<\/td>[\s\S]*?<\/tr>/)?.[0] ?? "",
+    /離脱/,
+  );
   assert.match(html, /対象外/);
   assert.match(html, /未接続/);
   assert.match(html, /ui-implementer/);
