@@ -751,6 +751,29 @@ export function createStore(database, options = {}) {
     );
   }
 
+  function setWorkImplementer(projectSlug, workSlug, input) {
+    const work = workBySlug(projectSlug, workSlug);
+    const implementer =
+      input?.implementer === undefined || input.implementer === null
+        ? ""
+        : String(input.implementer).trim();
+    assert(
+      implementer.length > 0,
+      400,
+      "invalid_request",
+      "implementer must be a non-empty identifier",
+    );
+    database
+      .prepare(
+        `UPDATE work
+         SET expected_participant_identifier = ?,
+             expected_participant_role = 'implementer'
+         WHERE id = ?`,
+      )
+      .run(implementer, work.id);
+    return getWork(projectSlug, workSlug);
+  }
+
   function resolveWork(projectSlug, workSlug) {
     const work = workBySlug(projectSlug, workSlug);
     database.prepare("UPDATE work SET state = 'resolved' WHERE id = ?").run(work.id);
@@ -2244,6 +2267,7 @@ export function createStore(database, options = {}) {
     previewWorkDeletion,
     resolveWork,
     reopenIssue,
+    setWorkImplementer,
     seedImportedMessage,
     updateDocument,
     _database: database,

@@ -224,6 +224,14 @@ async function routeApi(request, response, url, store) {
       json(response, 200, store.getWork(project, work));
       return true;
     }
+    if (method === "PATCH") {
+      json(
+        response,
+        200,
+        store.setWorkImplementer(project, work, await readJson(request)),
+      );
+      return true;
+    }
     if (method === "DELETE") {
       json(
         response,

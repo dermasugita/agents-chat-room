@@ -396,6 +396,46 @@ test("room listing exposes the expected implementer and independent presence sta
   });
 });
 
+test("an existing undeclared work can receive its implementer slot through the API", async () => {
+  let room = store
+    .listRooms()
+    .find(({ work }) => work.slug === "work-one");
+  assert.equal(room.expected_participant, null);
+  assert.equal(room.presence, null);
+
+  await withServer(async (base) => {
+    const response = await request(
+      base,
+      "PATCH",
+      "/api/v1/projects/sample/works/work-one",
+      { implementer: "late-implementer" },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(response.body.expected_participant, {
+      identifier: "late-implementer",
+      role: "implementer",
+    });
+  });
+
+  room = store.listRooms().find(({ work }) => work.slug === "work-one");
+  assert.deepEqual(room.expected_participant, {
+    identifier: "late-implementer",
+    role: "implementer",
+  });
+  assert.equal(room.presence.present, false);
+
+  await withServer(async (base) => {
+    const response = await request(
+      base,
+      "PATCH",
+      "/api/v1/projects/sample/works/work-one",
+      { implementer: "   " },
+    );
+    assert.equal(response.status, 400);
+    assert.equal(response.body.error, "invalid_request");
+  });
+});
+
 test("project deletion requires confirmation and reports every cascaded row", async () => {
   store.createProject({ slug: "delete-project", name: "Delete project" });
   store.createWork("delete-project", { slug: "alpha", title: "Alpha" });

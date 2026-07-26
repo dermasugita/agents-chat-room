@@ -17,6 +17,7 @@
   },
   "scripts": {
     "start": "node src/server.js",
+    "install:cli": "node scripts/install-cli.mjs",
     "test": "node --test --test-concurrency=1 test/*.test.js",
     "test:acceptance": "node --test --test-concurrency=1 test/acceptance.test.js",
     "test:issue-realtime": "node scripts/verify-issue-independence.mjs",

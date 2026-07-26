@@ -170,16 +170,24 @@ curl --fail http://127.0.0.1:7331/health
 
 ## Install the CLI
 
-The package has no runtime dependencies or native addons. Build a tarball on
-either supported machine:
+Install an atomic, smoke-tested copy outside the repository:
 
 ```sh
-npm pack
-npm install --global ./agents-chat-room-0.1.0.tgz
-ao --help
+npm run install:cli
+node "$HOME/.local/share/agents-chat-room-cli/bin/ao.js" --help
 ```
 
-Copy the same tarball to the other machine and install it with its Node 22.14+
+The installer copies every runtime entry declared by the package, including
+`templates/`, to `~/.local/share/agents-chat-room-cli/`. It then starts an
+isolated temporary server and runs the installed CLI's `rooms` and `join`
+commands from a plain temporary directory. An existing installation is
+moved aside while the new copy is checked; the new copy is kept on success and
+the previous copy is restored if the smoke test fails. Use
+`--destination ABSOLUTE_PATH` to select another path; repository-internal
+destinations are rejected.
+
+The package has no runtime dependencies or native addons. Run the same
+installer from a checkout on either supported machine with its Node 22.14+
 runtime.
 
 Configure the private server once for cold-start skills:
@@ -283,10 +291,16 @@ Create additional works and documents:
 ```sh
 ao create-work implementation --title "Implementation" \
   --implementer implementer
+ao create-work later --title "Declare its slot later"
+ao set-work-implementer later --implementer later-implementer
 ao create-document context --title "Shared terms" --file CONTEXT.md
 ao create-document handoff --slug implementation --title "Implementation handoff" \
   --file docs/handoff/implementation.md
 ```
+
+`set-work-implementer` declares or replaces the default implementer slot on an
+existing work. The next `ao rooms` listing and numbered skill join use that
+identifier.
 
 Use the thread:
 

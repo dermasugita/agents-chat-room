@@ -7,12 +7,13 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
@@ -25,6 +26,65 @@ import {
 } from "../scripts/lib/database-snapshot.mjs";
 
 const execFileAsync = promisify(execFile);
+
+test("CLI installer copies the complete runtime and smoke-tests rooms and join", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "ao-cli-installer-test-"));
+  const destination = join(directory, "stable-cli");
+  try {
+    const { stdout } = await execFileAsync(
+      process.execPath,
+      [
+        resolve("scripts/install-cli.mjs"),
+        "--destination",
+        destination,
+      ],
+      {
+        cwd: resolve("."),
+        env: {
+          ...process.env,
+          HOME: join(directory, "home"),
+        },
+      },
+    );
+    const result = JSON.parse(stdout);
+    assert.equal(result.installed, destination);
+    assert.equal(result.smoke.rooms, 1);
+    assert.equal(result.smoke.joined, "install-smoke/join-check");
+    assert.equal(
+      realpathSync(result.smoke.cli_path),
+      realpathSync(join(destination, "bin", "ao.js")),
+    );
+    assert.match(relative(resolve("."), result.smoke.cli_path), /^\.\./);
+    for (const path of [
+      "bin/ao.js",
+      "src/cli.js",
+      "templates/skills/session-chat/SKILL.md",
+      "templates/skills/session-chat/scripts/join-room.mjs",
+    ]) {
+      assert.equal(existsSync(join(destination, path)), true, path);
+    }
+    assert.equal(
+      readFileSync(
+        join(destination, "templates/skills/session-chat/SKILL.md"),
+        "utf8",
+      ),
+      readFileSync(
+        resolve("templates/skills/session-chat/SKILL.md"),
+        "utf8",
+      ),
+    );
+    assert.deepEqual(
+      readdirSync(directory).filter(
+        (name) =>
+          name.includes(".installing-") ||
+          name.includes(".previous-"),
+      ),
+      [],
+    );
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("direct startup defaults to the IPv4 loopback interface", async () => {
   const directory = mkdtempSync(join(tmpdir(), "ao-bind-test-"));

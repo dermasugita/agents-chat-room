@@ -665,6 +665,7 @@ test("every command rejects options it does not apply", async () => {
     "close",
     "resolve",
     "create-work",
+    "set-work-implementer",
     "create-document",
     "import",
   ]) {
@@ -1074,13 +1075,22 @@ test("cold room join uses the declared slot, pulls context, and exposes the full
       "cold-room",
       "--title",
       "Cold room",
+    ],
+    controller,
+  );
+  assert.equal(created.code, 0, created.stderr);
+  assert.equal(JSON.parse(created.stdout).expected_participant, null);
+  const declared = await runCli(
+    [
+      "set-work-implementer",
+      "cold-room",
       "--implementer",
       "cold-implementer",
     ],
     controller,
   );
-  assert.equal(created.code, 0, created.stderr);
-  assert.deepEqual(JSON.parse(created.stdout).expected_participant, {
+  assert.equal(declared.code, 0, declared.stderr);
+  assert.deepEqual(JSON.parse(declared.stdout).expected_participant, {
     identifier: "cold-implementer",
     role: "implementer",
   });
@@ -2189,8 +2199,21 @@ test("service skill templates contain none of the retired file protocol", () => 
     sessionSkill,
     /### 3\. Create your own git worktree — mandatory/,
   );
-  assert.match(sessionSkill, /Never work in the shared main checkout/);
+  assert.match(sessionSkill, /never work in the shared main checkout/i);
+  assert.match(sessionSkill, /Never reuse an existing one/);
   assert.match(sessionSkill, /git worktree add worktree\/<WORK>/);
+  assert.match(
+    sessionSkill,
+    /If `work\/<WORK>` is already checked out elsewhere/,
+  );
+  assert.match(sessionSkill, /Do not switch the other checkout/);
+  assert.match(sessionSkill, /-b work\/<WORK>-impl origin\/work\/<WORK>/);
+  assert.match(sessionSkill, /path must be `worktree\/<WORK>`/);
+  assert.match(sessionSkill, /not a detached\s+HEAD/);
+  assert.match(
+    sessionSkill,
+    /Never point `cli\.args` at a\s+path inside the repository/,
+  );
   assert.match(sessionSkill, /### 4\. Join from inside the worktree/);
   assert.match(sessionSkill, /join-room\.mjs <NUMBER> --repo \./);
   assert.match(

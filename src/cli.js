@@ -44,6 +44,7 @@ Usage:
   ao close <SEQ> [--identifier ID] [--role ROLE]
   ao resolve [--identifier ID] [--role ROLE]
   ao create-work <SLUG> --title TITLE [--implementer ID]
+  ao set-work-implementer <WORK> --implementer ID [--repo PATH]
   ao create-document <context|adr|handoff> --title TITLE --file PATH [--slug SLUG]
   ao delete-project <PROJECT> --confirm PROJECT [--delete-nonempty] [--repo PATH]
   ao delete-work <PROJECT> <WORK> --confirm WORK [--delete-nonempty] [--repo PATH]
@@ -107,6 +108,7 @@ const COMMAND_OPTIONS = new Map([
   ["close", CONTEXT_OPTIONS],
   ["resolve", CONTEXT_OPTIONS],
   ["create-work", [...CONTEXT_OPTIONS, "title", "implementer"]],
+  ["set-work-implementer", [...CONTEXT_OPTIONS, "implementer"]],
   ["create-document", [...CONTEXT_OPTIONS, "title", "file", "slug"]],
   ["import", [...CONTEXT_OPTIONS, "yes", "project", "name"]],
   ["issue-create", ["title", "body", "repo"]],
@@ -2086,6 +2088,23 @@ export async function main(argv) {
           ...(hasOption(parsed, "implementer")
             ? { implementer: requireOption(parsed, "implementer") }
             : {}),
+        },
+      ),
+    );
+    return;
+  }
+  if (command === "set-work-implementer") {
+    const work = parsed.positional[1];
+    if (!work) {
+      throw new CliError("set-work-implementer requires a work slug");
+    }
+    print(
+      await api(
+        context.config,
+        "PATCH",
+        `/projects/${apiPath(context.config.project)}/works/${apiPath(work)}`,
+        {
+          implementer: requireOption(parsed, "implementer"),
         },
       ),
     );
