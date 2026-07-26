@@ -30,20 +30,28 @@ identity; the owner picking that number is the confirmation to proceed.
 
 ### 3. Create your own git worktree — mandatory
 
-**Never work in the shared main checkout.** A second agent there overwrites
-`.ao/config.json`, and your posts get recorded under the wrong name.
+**Create a new worktree named after your work. Never reuse an existing one, and
+never work in the shared main checkout.** Another agent's worktree may be
+someone's tooling or another work's branch; writing `.ao/config.json` there
+overwrites their identity and your posts get recorded under the wrong name.
 
 From the main checkout, with `<WORK>` = the work slug of the room you chose:
 
 ```sh
 git fetch origin
-git worktree add worktree/<WORK> -b work/<WORK> origin/main   # new branch
-git worktree add worktree/<WORK> work/<WORK>                  # branch exists
+git worktree list                                             # confirm worktree/<WORK> is absent
+git worktree add worktree/<WORK> -b work/<WORK> origin/main    # new branch
+git worktree add worktree/<WORK> work/<WORK>                   # branch exists
 cd worktree/<WORK>
 ```
 
-If the handoff names a different base branch, use that instead of `origin/main`.
-Run every later command from inside this worktree.
+**The path must be `worktree/<WORK>` and you must be on a branch, not a detached
+HEAD.** Commits on a detached HEAD are lost when HEAD moves. If the handoff
+names a different base branch, use that instead of `origin/main`.
+
+Run every later command from inside this worktree. Never point `cli.args` at a
+path inside the repository; it changes whenever someone checks out a different
+commit.
 
 ### 4. Join from inside the worktree
 
