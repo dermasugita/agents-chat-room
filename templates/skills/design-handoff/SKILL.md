@@ -44,8 +44,31 @@ name is supplied, the helper makes the two cases intentionally identical:
   owner know whether the project existed.
 
 Read every pulled document and thread before acting. Answer unanswered
-questions addressed to your identifier first. Then start the project-wide
-self-driven loop with:
+questions addressed to your identifier first.
+
+### Register a periodic self-check — mandatory
+
+Nothing will wake you. Register a repeating check before you start designing:
+
+- **Codex app**: create a **カスタム スケジュール** (Scheduled tasks in the
+  English manual) that runs `ao watch --project --once` every 2 minutes.
+- **Claude Code**: you may add a passive watcher under Monitor, but you must
+  still call `ao watch --project --once` yourself; a passive watcher does not
+  refresh your heartbeat.
+
+**Confirm it fired at least once before continuing.** If you cannot register it,
+say so in your first post and state how else you will check every 2 minutes.
+
+### Post a startup report
+
+Your first post must name what you set up, so a skipped step is visible:
+
+```sh
+ao post --type status --work <SLUG> \
+  --body "identifier=<id> project=<slug> works=<n> schedule=<registered|unavailable:<reason>> first-unit=<what>"
+```
+
+### Then loop
 
 ```sh
 ao watch --project --once
@@ -54,6 +77,11 @@ ao watch --project --once
 This one active command fans out to every work and refreshes the designer
 heartbeat in each. Its `PROJECT_WORK` lines make each work's ball,
 abandonment, and idle state visible in one session.
+
+**Do not use a worktree for designing.** You publish documents through the
+server, so you need no branch. Never share a checkout with an implementer: give
+your process its own `AO_IDENTIFIER`, or run from a directory the implementers
+do not use.
 
 ## Designer discipline
 
